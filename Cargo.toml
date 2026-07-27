@@ -1,0 +1,31 @@
+[package]
+name = "bspwm-rs"
+version = "0.9.12"
+edition = "2024"
+license = "BSD-2-Clause"
+description = "A behavior-compatible Rust transcription of bspwm"
+
+[workspace]
+members = [".", "crates/bspwm-client", "crates/bspwm-core", "crates/bspwm-daemon", "crates/bspwm-model"]
+default-members = [".", "crates/bspwm-client", "crates/bspwm-core", "crates/bspwm-daemon", "crates/bspwm-model"]
+resolver = "3"
+
+[[bin]]
+name = "bspwm-rs"
+path = "src/bin/bspwm-rs.rs"
+
+[[bin]]
+name = "bspc-rs"
+path = "src/bin/bspc-rs.rs"
+
+[dependencies]
+bspwm-client = { version = "0.9.12", path = "crates/bspwm-client" }
+bspwm = { package = "bspwm-daemon", version = "0.9.12", path = "crates/bspwm-daemon" }
+xcb = { version = "1.7.0", features = ["randr", "shape", "xinerama"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

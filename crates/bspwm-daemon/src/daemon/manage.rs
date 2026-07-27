@@ -1,0 +1,861 @@
+//! Window adoption: scheduling, rule resolution, bookkeeping, and removal.
+
+use xcb::{Xid, XidNew, x};
+
+use super::action::XAction;
+use super::events::XEventContext;
+use super::{DaemonApp, WindowLocation};
+use crate::events::EventHandler;
+use crate::monitor;
+use crate::rule::{
+    ExternalRuleProcess, RuleConsequence, apply_builtin_rules, make_rule_consequence,
+    parse_keys_values,
+};
+use crate::runtime::RuntimeError;
+use crate::tree::{ChildPolarity, Client, IcccmProps, SizeHints};
+use crate::types::{Direction, Rectangle, SplitType, SubscriberMask, WmFlags};
+use crate::window;
+use crate::world::{DesktopId, MonitorId};
+use crate::x11::X11;
+
+#[derive(Debug)]
+pub(super) enum PendingRuleEvent {
+    ClientMessage {
+        window: x::Window,
+        message_type: x::Atom,
+        data: x::ClientMessageData,
+    },
+    PropertyNotify {
+        window: x::Window,
+        atom: x::Atom,
+        time: x::Timestamp,
+        state: x::Property,
+    },
+}
+
+#[derive(Debug)]
+pub(super) struct PendingRule {
+    window: u32,
+    consequence: RuleConsequence,
+    initial_rectangle: Rectangle,
+    size_hints: SizeHints,
+    client_initial: ClientInitial,
+    desktop_window: bool,
+    process: ExternalRuleProcess,
+    events: Vec<PendingRuleEvent>,
+}
+
+/// The per-client X state a rule consequence cannot supply.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ClientInitial {
+    icccm: IcccmProps,
+    urgent: bool,
+    wm_flags: WmFlags,
+}
+
+impl DaemonApp {
+    #[doc(hidden)]
+    #[allow(clippy::too_many_lines)]
+    pub fn manage_window_with_initial(
+        &mut self,
+        window: u32,
+        consequence: &RuleConsequence,
+        initial_rectangle: Rectangle,
+        size_hints: SizeHints,
+        client_initial: ClientInitial,
+        internal_xid: u32,
+    ) -> Option<WindowLocation> {
+        if let Some(location) = self.managed_window(window) {
+            return Some(location);
+        }
+        if !consequence.manage {
+            return None;
+        }
+        let mut target = self.command().resolve_rule_target(consequence);
+        if consequence.sticky {
+            let monitor = self.world().focused_monitor?;
+            let desktop = self.world().monitor(monitor).active_desktop?;
+            target.monitor = Some(monitor);
+            target.desktop = Some(desktop);
+            target.node = self.world().desktop(desktop).tree.focus;
+        }
+        let monitor = target.monitor?;
+        let desktop = target.desktop?;
+        let was_empty = self.world().desktop(desktop).tree.root.is_none();
+        let anchor = target
+            .node
+            .or(self.world().desktop(desktop).tree.focus)
+            .or(self.world().desktop(desktop).tree.root);
+        let split_ratio = self.state.settings.split_ratio;
+        let node = self.tree_mut().add_node(window, split_ratio);
+        let mut client = Client::from_settings(&self.state.settings);
+        client.class_name.clone_from(&consequence.class_name);
+        client.instance_name.clone_from(&consequence.instance_name);
+        client.name.clone_from(&consequence.name);
+        client.border_width = if consequence.border {
+            self.world().desktop(desktop).border_width
+        } else {
+            0
+        };
+        client.floating_rectangle = consequence.rect.unwrap_or(initial_rectangle);
+        let monitors = self.monitor_rectangles();
+        if let Some(source_monitor) =
+            monitor::monitor_from_client(&monitors, client.floating_rectangle)
+        {
+            let source = self.world().monitor(source_monitor).rectangle;
+            client.floating_rectangle = window::embrace(client.floating_rectangle, source);
+            client.floating_rectangle = window::adapt_geometry(
+                client.floating_rectangle,
+                source,
+                self.world().monitor(monitor).rectangle,
+            );
+        }
+        if consequence.center
+            || consequence.rect.is_none() && initial_rectangle.x == 0 && initial_rectangle.y == 0
+        {
+            client.floating_rectangle = window::center(
+                client.floating_rectangle,
+                self.world().monitor(monitor).rectangle,
+                u16::try_from(client.border_width).unwrap_or(u16::MAX),
+            );
+        }
+        if let Some(state) = consequence.state {
+            client.state = state;
+        }
+        if consequence.state == Some(crate::types::ClientState::Floating)
+            && let Some(anchor_client) = anchor.and_then(|anchor| self.client_of(anchor))
+        {
+            client.layer = anchor_client.layer;
+        }
+        if let Some(layer) = consequence.layer {
+            client.layer = layer;
+        }
+        if consequence.honor_size_hints != crate::types::HonorSizeHintsMode::Default {
+            client.honor_size_hints = consequence.honor_size_hints;
+        }
+        client.size_hints = size_hints;
+        client.icccm = client_initial.icccm;
+        client.urgent = client_initial.urgent;
+        client.wm_flags = client_initial.wm_flags;
+        let receives_focus = !consequence.hidden
+            && consequence.focus
+            && (self.world().monitor(monitor).active_desktop == Some(desktop)
+                || consequence.follow);
+        if receives_focus {
+            client.urgent = false;
+        }
+        client.shown =
+            self.world().monitor(monitor).active_desktop == Some(desktop) && !consequence.hidden;
+        self.node_mut(node).client = Some(client);
+        {
+            let item = self.node_mut(node);
+            item.hidden = consequence.hidden;
+            item.sticky = consequence.sticky;
+            item.private = consequence.private;
+            item.locked = consequence.locked;
+            item.marked = consequence.marked;
+        }
+
+        // Read before the insert: filling a bare receptacle consumes the
+        // anchor, and the `node_add` record still names it.
+        let anchor_id = anchor.map_or(0, |id| self.xid(id));
+        let mut tree_state = self.world().desktop(desktop).tree;
+        if let Some(anchor) = anchor {
+            let split_ratio = self.state.settings.split_ratio;
+            let branch = self.tree_mut().add_node(internal_xid, split_ratio);
+            let (polarity, split_type) = match consequence.split_dir {
+                Some(Direction::North) => (ChildPolarity::First, Some(SplitType::Horizontal)),
+                Some(Direction::West) => (ChildPolarity::First, Some(SplitType::Vertical)),
+                Some(Direction::South) => (ChildPolarity::Second, Some(SplitType::Horizontal)),
+                Some(Direction::East) => (ChildPolarity::Second, Some(SplitType::Vertical)),
+                None => (
+                    match self.state.settings.initial_polarity {
+                        crate::types::ChildPolarity::FirstChild => ChildPolarity::First,
+                        crate::types::ChildPolarity::SecondChild => ChildPolarity::Second,
+                    },
+                    None,
+                ),
+            };
+            if let Some(split_type) = split_type {
+                self.node_mut(branch).split_type = split_type;
+            }
+            if consequence.split_ratio != 0.0 {
+                self.node_mut(branch).split_ratio = consequence.split_ratio;
+            }
+            match self.tree_mut().insert(
+                &mut tree_state,
+                node,
+                Some(anchor),
+                Some(branch),
+                polarity,
+            ) {
+                // The anchor was a bare receptacle, so `insert` replaced it in
+                // place and the branch allocated for the split went unused.
+                Ok(Some(_)) => self.tree_mut().destroy_subtree(branch),
+                Ok(None) => {}
+                Err(_) => {
+                    self.tree_mut().destroy_subtree(branch);
+                    self.tree_mut().destroy_subtree(node);
+                    self.state.forget_retired_nodes();
+                    return None;
+                }
+            }
+            self.state.forget_retired_nodes();
+        } else if self
+            .tree_mut()
+            .insert(&mut tree_state, node, None, None, ChildPolarity::Second)
+            .is_err()
+        {
+            self.tree_mut().destroy_subtree(node);
+            self.state.forget_retired_nodes();
+            return None;
+        }
+        self.tree_mut().sync_vacancy(node);
+        if !consequence.hidden && consequence.focus {
+            tree_state.focus = Some(node);
+            if self.world().monitor(monitor).active_desktop == Some(desktop) || consequence.follow {
+                self.world_mut().focused_monitor = Some(monitor);
+                self.world_mut().monitor_mut(monitor).active_desktop = Some(desktop);
+                self.node_mut(node).client.as_mut()?.shown = true;
+            }
+        }
+        self.world_mut().desktop_mut(desktop).tree = tree_state;
+        if consequence.sticky {
+            let sticky_count = self.world().monitor(monitor).sticky_count.saturating_add(1);
+            self.world_mut().monitor_mut(monitor).sticky_count = sticky_count;
+        }
+        self.state.clients_count = self.state.clients_count.saturating_add(1);
+        self.state.history.add(
+            crate::history::Coordinates {
+                monitor,
+                desktop,
+                node: Some(node),
+            },
+            !consequence.hidden && consequence.focus,
+        );
+        let status = format!(
+            "node_add {} 0x{window:08X}\n",
+            self.node_ids_raw(monitor, desktop, anchor_id)
+        );
+        self.publish(SubscriberMask::NODE_ADD, &status);
+        if was_empty {
+            self.broadcast_report();
+        }
+        Some((monitor, desktop, node))
+    }
+
+    #[doc(hidden)]
+    pub fn schedule_window(
+        &mut self,
+        x11: &X11,
+        window_id: u32,
+    ) -> Result<Option<WindowLocation>, RuntimeError> {
+        if self.managed_window(window_id).is_some()
+            || self
+                .pending_rules
+                .iter()
+                .any(|rule| rule.window == window_id)
+        {
+            return Ok(None);
+        }
+        let window_id_typed = x::Window::new(window_id);
+        let properties = window::rule_properties(x11, window_id_typed)?;
+        if properties.override_redirect {
+            return Ok(None);
+        }
+        let mut consequence = make_rule_consequence();
+        let desktop_window = properties
+            .builtin
+            .window_types
+            .contains(&crate::rule::BuiltinWindowType::Desktop);
+        apply_builtin_rules(&properties.builtin, &mut consequence);
+        consequence.set_window_properties(&properties.identity);
+        self.state.rules.apply_rules(&mut consequence);
+        if !self.state.settings.external_rules_command.is_empty() {
+            self.command().resolve_rule_consequence(&mut consequence);
+            if let Ok(process) = ExternalRuleProcess::spawn(
+                &self.state.settings.external_rules_command,
+                window_id,
+                &consequence,
+            ) {
+                self.pending_rules.push(PendingRule {
+                    window: window_id,
+                    consequence,
+                    initial_rectangle: properties.geometry.rectangle,
+                    size_hints: properties.size_hints,
+                    client_initial: ClientInitial {
+                        icccm: properties.icccm,
+                        urgent: properties.urgent,
+                        wm_flags: properties.wm_flags,
+                    },
+                    desktop_window,
+                    process,
+                    events: Vec::new(),
+                });
+                return Ok(None);
+            }
+        }
+
+        self.finish_scheduled_window(
+            x11,
+            window_id,
+            &consequence,
+            properties.geometry.rectangle,
+            properties.size_hints,
+            ClientInitial {
+                icccm: properties.icccm,
+                urgent: properties.urgent,
+                wm_flags: properties.wm_flags,
+            },
+            desktop_window,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_scheduled_window(
+        &mut self,
+        x11: &X11,
+        window_id: u32,
+        consequence: &RuleConsequence,
+        initial_rectangle: Rectangle,
+        size_hints: SizeHints,
+        client_initial: ClientInitial,
+        desktop_window: bool,
+    ) -> Result<Option<WindowLocation>, RuntimeError> {
+        let window_id_typed = x::Window::new(window_id);
+        if !window::exists(x11, x::Window::new(window_id)) {
+            return Ok(None);
+        }
+        if !self.state.settings.ignore_ewmh_struts && self.apply_strut(x11, window_id_typed)? {
+            self.arrange_all(x11)?;
+        }
+        if !consequence.manage {
+            let mut plan = Vec::new();
+            if desktop_window {
+                plan.push(XAction::Lower { window: window_id });
+            }
+            plan.push(XAction::Map { window: window_id });
+            Self::execute_plan(x11, &plan)?;
+            return Ok(None);
+        }
+
+        let internal_xid = x11.connection().generate_id::<x::Window>().resource_id();
+        let Some(location) = self.manage_window_with_initial(
+            window_id,
+            consequence,
+            initial_rectangle,
+            size_hints,
+            client_initial,
+            internal_xid,
+        ) else {
+            return Ok(None);
+        };
+        let (monitor, desktop, node) = location;
+        self.destroy_retired_feedbacks(x11)?;
+        self.arrange_desktop(x11, monitor, desktop)?;
+        let mut plan = Vec::new();
+        plan.push(XAction::SetClientEventMask {
+            window: window_id,
+            enter_window: self.state.settings.focus_follows_pointer,
+        });
+        plan.push(XAction::SetWmStateNormal { window: window_id });
+        let client = self.client_of(node);
+        if client.is_some_and(|client| client.shown) {
+            plan.push(XAction::Map { window: window_id });
+        }
+        let focus_client = if !consequence.hidden
+            && consequence.focus
+            && self.world().focused_monitor == Some(monitor)
+            && self.world().monitor(monitor).active_desktop == Some(desktop)
+        {
+            let client = self.client(node);
+            Some((client.icccm.input_hint, client.icccm.take_focus))
+        } else {
+            None
+        };
+        Self::execute_plan(x11, &plan)?;
+        if let Some((input_hint, take_focus)) = focus_client {
+            window::focus_client(x11, window_id_typed, input_hint, take_focus)?;
+        }
+        crate::pointer::grab_client_buttons(
+            x11,
+            window_id_typed,
+            &self.state.settings,
+            self.lock_masks,
+        )?;
+        let focused = self.world().desktop(desktop).tree.focus == Some(node);
+        let actions = self.state.stacking_order.stack(
+            &self.state.world.tree,
+            node,
+            focused,
+            self.state.auto_raise,
+        );
+        self.execute_restacks(x11, desktop, &actions)?;
+        self.sync_window_state(x11, node)?;
+        self.refresh_colors(x11)?;
+        self.update_ewmh(x11)?;
+        Ok(Some(location))
+    }
+
+    pub(super) fn poll_pending_rules(&mut self, x11: &X11) -> Result<bool, RuntimeError> {
+        self.reaping_rules.retain_mut(|process| !process.reap());
+        let completed: Vec<PendingRule> = self
+            .pending_rules
+            .extract_if(.., |rule| rule.process.poll())
+            .collect();
+        if completed.is_empty() {
+            return Ok(false);
+        }
+        for mut pending in completed {
+            parse_keys_values(
+                &String::from_utf8_lossy(pending.process.output()),
+                &mut pending.consequence,
+            );
+            let location = self.finish_scheduled_window(
+                x11,
+                pending.window,
+                &pending.consequence,
+                pending.initial_rectangle,
+                pending.size_hints,
+                pending.client_initial,
+                pending.desktop_window,
+            )?;
+            if location.is_some() {
+                for event in pending.events {
+                    let mut context = XEventContext { app: self, x11 };
+                    match event {
+                        PendingRuleEvent::ClientMessage {
+                            window,
+                            message_type,
+                            data,
+                        } => {
+                            let event = x::ClientMessageEvent::new(window, message_type, data);
+                            context.client_message(&event)?;
+                        }
+                        PendingRuleEvent::PropertyNotify {
+                            window,
+                            atom,
+                            time,
+                            state,
+                        } => {
+                            let event = x::PropertyNotifyEvent::new(window, atom, time, state);
+                            context.property_notify(&event)?;
+                        }
+                    }
+                }
+            }
+            if !pending.process.reap() {
+                self.reaping_rules.push(pending.process);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Terminates and forgets every external rule process, pending or reaping.
+    pub(super) fn terminate_pending_rules(&mut self) {
+        for pending in &mut self.pending_rules {
+            pending.process.terminate();
+        }
+        self.pending_rules.clear();
+        for process in &mut self.reaping_rules {
+            process.terminate();
+        }
+        self.reaping_rules.clear();
+    }
+
+    /// Queues an event for replay once `window`'s external rule finishes, and
+    /// reports whether such a rule is still pending.
+    fn postpone_event(&mut self, window: x::Window, event: PendingRuleEvent) -> bool {
+        let window = window.resource_id();
+        let Some(pending) = self
+            .pending_rules
+            .iter_mut()
+            .find(|pending| pending.window == window)
+        else {
+            return false;
+        };
+        pending.events.push(event);
+        true
+    }
+
+    pub(super) fn postpone_client_message(&mut self, event: &x::ClientMessageEvent) -> bool {
+        self.postpone_event(
+            event.window(),
+            PendingRuleEvent::ClientMessage {
+                window: event.window(),
+                message_type: event.r#type(),
+                data: event.data(),
+            },
+        )
+    }
+
+    pub(super) fn postpone_property_notify(&mut self, event: &x::PropertyNotifyEvent) -> bool {
+        self.postpone_event(
+            event.window(),
+            PendingRuleEvent::PropertyNotify {
+                window: event.window(),
+                atom: event.atom(),
+                time: event.time(),
+                state: event.state(),
+            },
+        )
+    }
+
+    pub(super) fn forget_window(&mut self, window: u32) -> Option<(MonitorId, DesktopId)> {
+        let (monitor, desktop, node) = self.managed_window(window)?;
+        let was_sticky = self.node(node).sticky;
+        let status = format!(
+            "node_remove {} 0x{window:08X}\n",
+            self.desktop_ids(monitor, desktop)
+        );
+        self.publish(SubscriberMask::NODE_REMOVE, &status);
+        self.state
+            .history
+            .remove_node(&self.state.world.tree, node, true);
+        self.state
+            .stacking_order
+            .remove_subtree(&self.state.world.tree, node);
+        self.tree_mut().cancel_presel(node);
+        let mut tree_state = self.world().desktop(desktop).tree;
+        if self.tree_mut().unlink(&mut tree_state, node).is_err() {
+            return None;
+        }
+        // `unlink` only detaches: the node is now unreachable from any desktop,
+        // so this is where upstream `free`s it.
+        self.tree_mut().destroy_subtree(node);
+        self.state.forget_retired_nodes();
+        self.world_mut().desktop_mut(desktop).tree = tree_state;
+        if was_sticky {
+            let sticky_count = self.world().monitor(monitor).sticky_count.saturating_sub(1);
+            self.world_mut().monitor_mut(monitor).sticky_count = sticky_count;
+        }
+        self.state.clients_count = self.state.clients_count.saturating_sub(1);
+        self.broadcast_report();
+        Some((monitor, desktop))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arrange;
+    use crate::commands::CommandHandler;
+    use crate::daemon::test_support::{
+        app_with_desktop, manage_window, manage_window_with, read_available, subscribe_socket,
+    };
+    use crate::state::CommandEffect;
+    use crate::types::{ClientState, HonorSizeHintsMode, StackLayer};
+
+    #[test]
+    fn unix_subscription_gets_manage_and_unmanage_records() {
+        let (mut app, _, _) = app_with_desktop();
+        let mut client = subscribe_socket(
+            &mut app,
+            b"subscribe\x00-c\x002\x00node_add\x00node_remove\x00",
+        );
+        let _ = manage_window(&mut app, 0xabc);
+        assert_eq!(
+            read_available(&mut client),
+            b"node_add 0x00000001 0x00000002 0x00000000 0x00000ABC\n"
+        );
+        assert!(app.forget_window(0xabc).is_some());
+        assert_eq!(
+            read_available(&mut client),
+            b"node_remove 0x00000001 0x00000002 0x00000ABC\n"
+        );
+        assert_eq!(app.subscriber_count(), 0);
+    }
+
+    #[test]
+    fn map_bookkeeping_produces_an_executable_arrangement_plan() {
+        let (mut app, monitor, desktop) = app_with_desktop();
+        let (_, _, node) = manage_window(&mut app, 0xabc);
+        let arranged =
+            arrange::arrange(&mut app.state.world, monitor, desktop, &app.state.settings);
+        let plan: Vec<_> = arranged.iter().map(DaemonApp::arrange_action).collect();
+        assert_eq!(app.state.clients_count, 1);
+        assert_eq!(app.state.world.tree.node(node).external_id, 0xabc);
+        assert!(matches!(
+            plan.first(),
+            Some(XAction::Configure { window: 0xabc, .. })
+        ));
+        let repeated =
+            arrange::arrange(&mut app.state.world, monitor, desktop, &app.state.settings);
+        assert_eq!(repeated.len(), 1);
+        assert_eq!(repeated[0].node, node);
+        assert_eq!(repeated[0].window, 0xabc);
+        assert!(!repeated[0].geometry_changed);
+    }
+
+    #[test]
+    fn focus_mutation_updates_history_urgency_and_deferred_lifecycle() {
+        let (mut app, monitor, desktop) = app_with_desktop();
+        let (_, _, node) = manage_window(&mut app, 10);
+        app.state
+            .world
+            .tree
+            .node_mut(node)
+            .client
+            .as_mut()
+            .unwrap()
+            .urgent = true;
+        assert!(CommandHandler::new(&mut app.state).focus_location(
+            crate::query::Coordinates {
+                monitor: Some(monitor),
+                desktop: Some(desktop),
+                node: Some(node),
+            },
+            false,
+        ));
+        assert!(
+            !app.state
+                .world
+                .tree
+                .node(node)
+                .client
+                .as_ref()
+                .unwrap()
+                .urgent
+        );
+        assert_eq!(
+            app.state.history.entries().last().unwrap().location.node,
+            Some(node)
+        );
+        assert!(app.state.pending_effects.iter().any(|effect| {
+            matches!(effect, CommandEffect::Focus { node: Some(value), .. } if *value == node)
+        }));
+    }
+
+    #[test]
+    fn destroy_bookkeeping_is_idempotent_and_preserves_invariants() {
+        let (mut app, _, _) = app_with_desktop();
+        manage_window(&mut app, 12);
+        assert!(app.forget_window(12).is_some());
+        assert!(app.forget_window(12).is_none());
+        assert_eq!(app.state.clients_count, 0);
+        assert_eq!(app.state.validate(), Ok(()));
+    }
+
+    /// The arena used to be a `Vec` that only ever grew: every map/unmap cycle
+    /// left both the client's node and the branch that had been split for it
+    /// behind forever. Freeing the slots has to return the arena to the size it
+    /// started at, however many cycles run.
+    #[test]
+    fn repeated_map_and_unmap_cycles_return_the_arena_to_its_starting_size() {
+        let (mut app, _, _) = app_with_desktop();
+        let baseline = app.tree().len();
+        assert_eq!(baseline, 0);
+
+        for round in 0..40_u32 {
+            let windows = [0x100 + round * 4, 0x101 + round * 4, 0x102 + round * 4];
+            for window in windows {
+                manage_window(&mut app, window);
+            }
+            // Three clients need two internal branches to hold them.
+            assert_eq!(app.tree().len(), 5);
+            assert_eq!(app.state.validate(), Ok(()));
+            for window in windows {
+                assert!(app.forget_window(window).is_some());
+            }
+            assert_eq!(
+                app.tree().len(),
+                baseline,
+                "arena grew after {} map/unmap cycles",
+                round + 1
+            );
+            assert_eq!(app.state.clients_count, 0);
+            assert_eq!(app.state.validate(), Ok(()));
+        }
+        assert!(app.state.history.entries().is_empty());
+        assert!(app.state.stacking_order.nodes().is_empty());
+    }
+
+    /// Filling a receptacle consumes it, and the branch `manage_window`
+    /// speculatively allocated for the split goes unused; neither may survive.
+    #[test]
+    fn filling_a_receptacle_frees_both_it_and_the_unused_branch() {
+        let (mut app, _, desktop) = app_with_desktop();
+        let external_id = app.state.world.next_external_id();
+        let receptacle = app
+            .state
+            .world
+            .insert_receptacle(desktop, None, 0.5)
+            .unwrap();
+        assert_eq!(app.tree().len(), 1);
+
+        let (_, _, node) = manage_window(&mut app, 0xabc);
+        assert_ne!(node, receptacle);
+        assert!(!app.tree().is_live(receptacle));
+        assert_eq!(app.tree().len(), 1);
+        assert_eq!(app.state.validate(), Ok(()));
+        // The freed receptacle's external id is available again.
+        assert_eq!(app.state.world.next_external_id(), external_id);
+    }
+
+    #[test]
+    fn consequence_placement_applies_fields_and_uses_unique_internal_ids() {
+        let (mut app, monitor, desktop) = app_with_desktop();
+        let mut consequence = make_rule_consequence();
+        consequence
+            .set_window_properties(&crate::rule::WindowProperties::new("App", "main", "Title"));
+        consequence.state = Some(ClientState::Floating);
+        consequence.layer = Some(StackLayer::Above);
+        consequence.split_dir = Some(Direction::North);
+        consequence.split_ratio = 0.3;
+        consequence.rect = Some(Rectangle::new(4, 5, 20, 10));
+        consequence.honor_size_hints = HonorSizeHintsMode::Yes;
+        consequence.private = true;
+        consequence.locked = true;
+        consequence.marked = true;
+        consequence.border = false;
+        let first = manage_window_with(
+            &mut app,
+            10,
+            &consequence,
+            Rectangle::default(),
+            SizeHints::default(),
+            1000,
+        )
+        .unwrap()
+        .2;
+        let _second = manage_window_with(
+            &mut app,
+            11,
+            &consequence,
+            Rectangle::default(),
+            SizeHints::default(),
+            1001,
+        )
+        .unwrap()
+        .2;
+        let third = manage_window_with(
+            &mut app,
+            12,
+            &consequence,
+            Rectangle::default(),
+            SizeHints::default(),
+            1002,
+        )
+        .unwrap()
+        .2;
+        let client = app.state.world.tree.node(first).client.as_ref().unwrap();
+        assert_eq!(client.class_name, "App");
+        assert_eq!(client.instance_name, "main");
+        assert_eq!(client.name, "Title");
+        assert_eq!(client.state, ClientState::Floating);
+        assert!(app.state.world.tree.node(first).vacant);
+        assert!(app.state.world.tree.node(third).vacant);
+        assert_eq!(client.layer, StackLayer::Above);
+        assert_eq!(client.border_width, 0);
+        assert_eq!(client.floating_rectangle, Rectangle::new(4, 5, 20, 10));
+        assert_eq!(client.honor_size_hints, HonorSizeHintsMode::Yes);
+        let first_parent = app.state.world.tree.node(first).parent.unwrap();
+        let second_parent = app.state.world.tree.node(third).parent.unwrap();
+        assert!(app.state.world.tree.node(first_parent).vacant);
+        assert!(app.state.world.tree.node(second_parent).vacant);
+        assert_ne!(
+            app.state.world.tree.node(first_parent).external_id,
+            app.state.world.tree.node(second_parent).external_id
+        );
+        assert_eq!(
+            app.state.world.tree.node(second_parent).split_type,
+            SplitType::Horizontal
+        );
+        assert!((app.state.world.tree.node(second_parent).split_ratio - 0.3).abs() < f64::EPSILON);
+        assert_eq!(app.state.world.desktop(desktop).tree.focus, Some(third));
+        assert_eq!(app.state.world.focused_monitor, Some(monitor));
+    }
+
+    #[test]
+    fn initial_hidden_and_fullscreen_clients_are_vacant() {
+        let (mut app, _, _) = app_with_desktop();
+        let mut consequence = make_rule_consequence();
+        consequence.hidden = true;
+        let hidden = manage_window_with(
+            &mut app,
+            20,
+            &consequence,
+            Rectangle::default(),
+            SizeHints::default(),
+            1000,
+        )
+        .unwrap()
+        .2;
+        assert!(app.state.world.tree.node(hidden).vacant);
+
+        let (mut app, _, _) = app_with_desktop();
+        let mut consequence = make_rule_consequence();
+        consequence.state = Some(ClientState::Fullscreen);
+        let fullscreen = manage_window_with(
+            &mut app,
+            21,
+            &consequence,
+            Rectangle::default(),
+            SizeHints::default(),
+            1000,
+        )
+        .unwrap()
+        .2;
+        assert!(app.state.world.tree.node(fullscreen).vacant);
+    }
+
+    #[test]
+    fn rule_target_descriptors_use_node_desktop_monitor_priority() {
+        let (mut app, first_monitor, first_desktop) = app_with_desktop();
+        let settings = app.state.settings.clone();
+        let second_monitor = app.state.world.create_monitor(
+            3,
+            Some("other"),
+            Rectangle::new(100, 0, 100, 80),
+            &settings,
+        );
+        let second_desktop = app.state.world.create_desktop(4, Some("II"), &settings);
+        assert!(app.state.world.add_desktop(second_monitor, second_desktop));
+
+        let mut consequence = make_rule_consequence();
+        consequence.monitor_desc = "other".into();
+        consequence.focus = false;
+        let monitor_target = manage_window_with(
+            &mut app,
+            20,
+            &consequence,
+            Rectangle::new(1, 1, 10, 10),
+            SizeHints::default(),
+            2000,
+        )
+        .unwrap();
+        assert_eq!(monitor_target.0, second_monitor);
+        assert_eq!(monitor_target.1, second_desktop);
+
+        consequence.desktop_desc = "I".into();
+        let desktop_target = manage_window_with(
+            &mut app,
+            21,
+            &consequence,
+            Rectangle::new(1, 1, 10, 10),
+            SizeHints::default(),
+            2001,
+        )
+        .unwrap();
+        assert_eq!(desktop_target.0, first_monitor);
+        assert_eq!(desktop_target.1, first_desktop);
+
+        consequence.node_desc = "0x00000014".into();
+        let node_target = manage_window_with(
+            &mut app,
+            22,
+            &consequence,
+            Rectangle::new(1, 1, 10, 10),
+            SizeHints::default(),
+            2002,
+        )
+        .unwrap();
+        assert_eq!(node_target.0, second_monitor);
+        assert_eq!(node_target.1, second_desktop);
+        assert_eq!(
+            app.state.world.tree.node(monitor_target.2).parent,
+            app.state.world.tree.node(node_target.2).parent,
+        );
+    }
+}

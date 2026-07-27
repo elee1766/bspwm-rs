@@ -1,0 +1,115 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+root_property_contains() {
+	xprop -root "$1" 2>/dev/null | grep -F "$2" >/dev/null
+}
+
+root_property_lacks() {
+	! root_property_contains "$1" "$2"
+}
+
+window_property_contains() {
+	xprop -id "$1" "$2" 2>/dev/null | grep -F "$3" >/dev/null
+}
+
+window_property_lacks() {
+	! window_property_contains "$1" "$2" "$3"
+}
+
+extension_present() {
+	xdpyinfo -queryExtensions | grep -F "$1" >/dev/null
+}
+
+extension_present RANDR || fail "Xephyr does not expose RANDR"
+extension_present SHAPE || fail "Xephyr does not expose SHAPE"
+extension_present XINERAMA || fail "Xephyr does not expose XINERAMA"
+
+root_property_contains _NET_SUPPORTED _NET_CLIENT_LIST \
+	|| fail "_NET_SUPPORTED omits _NET_CLIENT_LIST"
+root_property_contains _NET_SUPPORTED _NET_WM_STATE_FULLSCREEN \
+	|| fail "_NET_SUPPORTED omits _NET_WM_STATE_FULLSCREEN"
+wm_check=$(xprop -root _NET_SUPPORTING_WM_CHECK | awk '{print $NF}')
+[ -n "$wm_check" ] || fail "root lacks _NET_SUPPORTING_WM_CHECK"
+xwininfo -id "$wm_check" >/dev/null 2>&1 || fail "supporting WM check window does not exist"
+window_property_contains "$wm_check" _NET_SUPPORTING_WM_CHECK "$wm_check" \
+	|| fail "supporting WM check window does not point to itself"
+window_property_contains "$wm_check" _NET_WM_NAME '"bspwm"' \
+	|| fail "supporting WM check window lacks the bspwm name"
+
+$BSPC monitor focused --reset-desktops ewmh-a ewmh-b
+$BSPC desktop ewmh-a --focus
+poll_until 50 0.02 root_property_contains _NET_NUMBER_OF_DESKTOPS '= 2' \
+	|| fail "_NET_NUMBER_OF_DESKTOPS was not updated"
+poll_until 50 0.02 root_property_contains _NET_DESKTOP_NAMES '"ewmh-a", "ewmh-b"' \
+	|| fail "_NET_DESKTOP_NAMES was not updated"
+poll_until 50 0.02 root_property_contains _NET_CURRENT_DESKTOP '= 0' \
+	|| fail "_NET_CURRENT_DESKTOP did not select ewmh-a"
+
+first=$(add_test_window ewmh-first ScenarioEwmh)
+first_hex=$(printf '0x%x' "$(( first ))")
+poll_until 50 0.02 root_property_contains _NET_CLIENT_LIST "$first_hex" \
+	|| fail "_NET_CLIENT_LIST omits the first client"
+poll_until 50 0.02 root_property_contains _NET_CLIENT_LIST_STACKING "$first_hex" \
+	|| fail "_NET_CLIENT_LIST_STACKING omits the first client"
+poll_until 50 0.02 root_property_contains _NET_ACTIVE_WINDOW "$first_hex" \
+	|| fail "_NET_ACTIVE_WINDOW does not name the focused client"
+window_property_contains "$first" WM_CLASS '"ewmh-first", "ScenarioEwmh"' \
+	|| fail "WM_CLASS does not preserve instance and class"
+window_property_contains "$first" WM_NAME 'ScenarioEwmh:ewmh-first' \
+	|| fail "WM_NAME does not preserve the client title"
+window_property_contains "$first" WM_PROTOCOLS WM_DELETE_WINDOW \
+	|| fail "WM_PROTOCOLS omits WM_DELETE_WINDOW"
+window_property_contains "$first" WM_STATE 'window state: Normal' \
+	|| fail "managed client does not have normal WM_STATE"
+window_property_contains "$first" _NET_WM_DESKTOP '= 0' \
+	|| fail "first client has the wrong _NET_WM_DESKTOP"
+
+"$X_MESSAGE" desktop 1
+poll_until 50 0.02 root_property_contains _NET_CURRENT_DESKTOP '= 1' \
+	|| fail "_NET_CURRENT_DESKTOP did not select ewmh-b"
+assert_eq ewmh-b "$($BSPC query -D -d focused --names)" "EWMH desktop request focused ewmh-b"
+poll_until 50 0.02 window_property_contains "$first" WM_STATE 'window state: Iconic' \
+	|| fail "hidden desktop client did not enter iconic WM_STATE"
+
+"$X_MESSAGE" desktop 0
+poll_until 50 0.02 window_property_contains "$first" WM_STATE 'window state: Normal' \
+	|| fail "visible desktop client did not return to normal WM_STATE"
+"$X_MESSAGE" fullscreen "$first" add
+poll_until 50 0.02 window_property_contains "$first" _NET_WM_STATE _NET_WM_STATE_FULLSCREEN \
+	|| fail "fullscreen client lacks _NET_WM_STATE_FULLSCREEN"
+assert_eq fullscreen "$($BSPC query -T -n "$first" | jq -r '.client.state')" "EWMH fullscreen request updated model"
+"$X_MESSAGE" fullscreen "$first" remove
+poll_until 50 0.02 window_property_lacks "$first" _NET_WM_STATE _NET_WM_STATE_FULLSCREEN \
+	|| fail "fullscreen state atom was not removed"
+assert_eq tiled "$($BSPC query -T -n "$first" | jq -r '.client.state')" "EWMH fullscreen removal updated model"
+
+second=$(add_test_window ewmh-second ScenarioEwmh)
+second_hex=$(printf '0x%x' "$(( second ))")
+poll_until 50 0.02 root_property_contains _NET_CLIENT_LIST "$second_hex" \
+	|| fail "_NET_CLIENT_LIST omits the second client"
+poll_until 50 0.02 root_property_contains _NET_ACTIVE_WINDOW "$second_hex" \
+	|| fail "new client did not become _NET_ACTIVE_WINDOW"
+"$X_MESSAGE" active "$first"
+poll_until 50 0.02 root_property_contains _NET_ACTIVE_WINDOW "$first_hex" \
+	|| fail "_NET_ACTIVE_WINDOW did not follow node focus"
+assert_eq "$first" "$($BSPC query -N -n focused)" "EWMH active-window request updated model focus"
+
+"$X_MESSAGE" move "$first" 1
+poll_until 50 0.02 window_property_contains "$first" _NET_WM_DESKTOP '= 1' \
+	|| fail "_NET_WM_DESKTOP did not follow desktop transfer"
+assert_eq "$first" "$($BSPC query -N -d ewmh-b)" "EWMH desktop request moved the client"
+root_property_contains _NET_CURRENT_DESKTOP '= 0' \
+	|| fail "non-follow transfer unexpectedly changed _NET_CURRENT_DESKTOP"
+
+"$X_MESSAGE" close "$second"
+poll_until 100 0.05 node_missing "$second" || fail "_NET_CLOSE_WINDOW did not close the second client"
+$BSPC desktop ewmh-b --focus
+"$X_MESSAGE" close "$first"
+poll_until 100 0.05 node_missing "$first" || fail "_NET_CLOSE_WINDOW did not close the first client"
+poll_until 50 0.02 root_property_lacks _NET_CLIENT_LIST "$first_hex" \
+	|| fail "_NET_CLIENT_LIST retained the first closed client"
+poll_until 50 0.02 root_property_lacks _NET_CLIENT_LIST "$second_hex" \
+	|| fail "_NET_CLIENT_LIST retained the second closed client"
+$BSPC monitor focused --reset-desktops Desktop

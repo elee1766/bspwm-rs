@@ -1,0 +1,120 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+input_focus_is() {
+	[ "$("$X_MESSAGE" query-focus)" = "$1" ]
+}
+
+x_window_missing() {
+	! xwininfo -id "$1" >/dev/null 2>&1
+}
+
+old_border=$($BSPC config border_width)
+old_gap=$($BSPC config window_gap)
+$BSPC config border_width 0
+$BSPC config window_gap 0
+
+configured=$(add_controlled_window configured configure ScenarioControlled)
+$BSPC node "$configured" --state floating
+: > "$TEST_TMP/configured.events"
+send_window_command configured configure 100 120 240 180
+poll_until 100 0.02 window_has_full_geometry "$configured" 100 120 240 180 \
+	|| fail "floating client ConfigureRequest was not applied"
+configured_tree=$($BSPC query -T -n "$configured")
+assert_eq 100 "$(printf '%s' "$configured_tree" | jq -r '.client.floatingRectangle.x')" "floating model x"
+assert_eq 120 "$(printf '%s' "$configured_tree" | jq -r '.client.floatingRectangle.y')" "floating model y"
+assert_eq 240 "$(printf '%s' "$configured_tree" | jq -r '.client.floatingRectangle.width')" "floating model width"
+assert_eq 180 "$(printf '%s' "$configured_tree" | jq -r '.client.floatingRectangle.height')" "floating model height"
+
+$BSPC node "$configured" --state tiled
+poll_until 50 0.02 x_matches_model_rectangle "$configured" \
+	|| fail "client did not settle into tiled geometry"
+tiled_x=$(x_window_x "$configured")
+tiled_y=$(x_window_y "$configured")
+tiled_width=$(x_window_width "$configured")
+tiled_height=$(x_window_height "$configured")
+send_window_command configured barrier
+poll_until 100 0.02 window_event_log_contains configured 'command barrier ok' \
+	|| fail "controlled client barrier did not complete"
+: > "$TEST_TMP/configured.events"
+send_window_command configured configure 11 12 123 124
+expected_configure="configure-notify x=$tiled_x y=$tiled_y width=$tiled_width height=$tiled_height border=0 synthetic=true"
+poll_until 100 0.02 window_event_log_contains configured "$expected_configure" \
+	|| fail "tiled ConfigureRequest did not produce a synthetic ConfigureNotify"
+poll_until 50 0.02 window_has_full_geometry "$configured" "$tiled_x" "$tiled_y" "$tiled_width" "$tiled_height" \
+	|| fail "tiled client ConfigureRequest changed authoritative geometry"
+
+$BSPC node "$configured" --state pseudo_tiled
+send_window_command configured configure 21 22 210 160
+poll_until 100 0.02 window_has_geometry "$configured" 210 160 \
+	|| fail "pseudo-tiled ConfigureRequest did not update preferred dimensions"
+assert_eq 210 "$($BSPC query -T -n "$configured" | jq -r '.client.floatingRectangle.width')" "pseudo-tiled model width"
+assert_eq 160 "$($BSPC query -T -n "$configured" | jq -r '.client.floatingRectangle.height')" "pseudo-tiled model height"
+
+send_window_command configured unmap
+poll_until 100 0.02 node_missing "$configured" || fail "self-unmapped client stayed managed"
+poll_until 100 0.02 window_event_log_contains configured unmap-notify \
+	|| fail "client did not receive UnmapNotify"
+send_window_command configured map
+poll_until 100 0.02 node_exists "$configured" || fail "self-remapped client was not managed again"
+poll_until 100 0.02 window_has_full_geometry "$configured" "$tiled_x" "$tiled_y" "$tiled_width" "$tiled_height" \
+	|| fail "remapped client did not return to managed geometry"
+send_window_command configured destroy
+poll_until 100 0.02 node_missing "$configured" || fail "self-destroyed client stayed managed"
+
+focus_a=$(add_controlled_window focus-a focus-a ScenarioControlled)
+focus_b=$(add_controlled_window focus-b focus-b ScenarioControlled)
+$BSPC node "$focus_a" --focus
+poll_until 50 0.02 input_focus_is "$focus_a" || fail "bspwm did not focus focus-a in X"
+send_window_command focus-b focus
+poll_until 100 0.02 input_focus_is "$focus_a" \
+	|| fail "bspwm did not correct focus stolen by focus-b"
+assert_eq "$focus_a" "$($BSPC query -N -n focused)" "model focus survived focus theft"
+
+take_focus=$(add_controlled_window take-focus take-focus ScenarioControlled --input false --take-focus)
+$BSPC node "$focus_a" --focus
+poll_until 50 0.02 input_focus_is "$focus_a" || fail "focus-a was not restored before WM_TAKE_FOCUS test"
+send_window_command take-focus barrier
+poll_until 100 0.02 window_event_log_contains take-focus 'command barrier ok' \
+	|| fail "take-focus barrier did not complete"
+: > "$TEST_TMP/take-focus.events"
+$BSPC node "$take_focus" --focus
+poll_until 100 0.02 window_event_log_contains take-focus 'client-message WM_TAKE_FOCUS' \
+	|| fail "input=false client did not receive WM_TAKE_FOCUS"
+poll_until 100 0.02 input_focus_is "$take_focus" \
+	|| fail "WM_TAKE_FOCUS client did not accept X focus"
+
+no_focus=$(add_controlled_window no-focus no-focus ScenarioControlled --input false)
+$BSPC node "$take_focus" --focus
+poll_until 50 0.02 input_focus_is "$take_focus" || fail "take-focus was not restored before input=false test"
+send_window_command no-focus barrier
+poll_until 100 0.02 window_event_log_contains no-focus 'command barrier ok' \
+	|| fail "no-focus initial barrier did not complete"
+: > "$TEST_TMP/no-focus.events"
+$BSPC node "$no_focus" --focus
+assert_eq "$no_focus" "$($BSPC query -N -n focused)" "input=false client became model focus"
+poll_until 50 0.02 input_focus_is "$take_focus" \
+	|| fail "input=false client without WM_TAKE_FOCUS received direct X focus"
+send_window_command no-focus barrier
+poll_until 100 0.02 window_event_log_contains no-focus 'command barrier ok' \
+	|| fail "no-focus verification barrier did not complete"
+if window_event_log_contains no-focus focus-in; then
+	fail "input=false client without WM_TAKE_FOCUS received a FocusIn event"
+fi
+
+close_test_window "$no_focus"
+close_test_window "$take_focus"
+close_test_window "$focus_b"
+close_test_window "$focus_a"
+
+no_delete=$(add_controlled_window no-delete no-delete ScenarioControlled --no-delete-window)
+close_test_window "$no_delete"
+poll_until 100 0.02 x_window_missing "$no_delete" \
+	|| fail "client without WM_DELETE_WINDOW was not killed"
+if window_event_log_contains no-delete 'client-message WM_DELETE_WINDOW'; then
+	fail "client without WM_DELETE_WINDOW received the protocol message"
+fi
+
+$BSPC config border_width "$old_border"
+$BSPC config window_gap "$old_gap"

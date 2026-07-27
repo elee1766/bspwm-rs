@@ -1,0 +1,15 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+xid=$(add_test_window restart ScenarioRestart)
+socket_before=$($BSPC --print-socket-path)
+assert_eq "$BSPWM_SOCKET" "$socket_before" "socket path before restart"
+$BSPC wm --restart
+poll_until 100 0.05 node_exists "$xid" || fail "client was not restored after daemon restart"
+
+socket_after=$($BSPC --print-socket-path)
+assert_eq "$BSPWM_SOCKET" "$socket_after" "socket path after restart"
+assert_eq "$socket_before" "$socket_after" "socket identity after restart"
+assert_eq ScenarioRestart "$($BSPC query -T -n "$xid" | jq -r '.client.className')" "client class after restart"
+close_test_window "$xid"

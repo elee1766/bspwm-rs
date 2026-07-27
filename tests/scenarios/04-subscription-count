@@ -1,0 +1,19 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+events=$TEST_TMP/subscription.events
+fifo=$($BSPC subscribe --fifo --count 4 node_add node_remove)
+cat "$fifo" > "$events" &
+reader_pid=$!
+
+first=$(add_test_window first ScenarioSubscribe)
+second=$(add_test_window second ScenarioSubscribe)
+close_test_window "$first"
+close_test_window "$second"
+poll_until 100 0.05 process_exited "$reader_pid" || fail "subscription did not reach its exact count"
+wait "$reader_pid"
+
+assert_eq 4 "$(wc -l < "$events" | tr -d ' ')" "subscription event count"
+assert_eq 2 "$(grep -c '^node_add ' "$events")" "node_add count"
+assert_eq 2 "$(grep -c '^node_remove ' "$events")" "node_remove count"

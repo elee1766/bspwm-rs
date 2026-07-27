@@ -1,0 +1,21 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+first=$(add_test_window first ScenarioInsert)
+$BSPC node "$first" --presel-dir east
+assert_eq east "$($BSPC query -T -n "$first" | jq -r '.presel.splitDir')" "preselection direction"
+second=$(add_test_window second ScenarioInsert)
+root=$($BSPC query -T -n @/)
+assert_eq vertical "$(printf '%s' "$root" | jq -r '.splitType')" "east insertion split type"
+assert_eq 2 "$(printf '%s' "$root" | jq '[.. | objects | select(.client != null)] | length')" "inserted client count"
+close_test_window "$first"
+close_test_window "$second"
+
+$BSPC node --insert-receptacle
+assert_eq 1 "$(node_count)" "receptacle node count"
+assert_eq true "$($BSPC query -T -n @/ | jq '.client == null')" "empty receptacle"
+receptacle_client=$(add_test_window receptacle ScenarioReceptacle)
+assert_eq 1 "$(node_count)" "filled receptacle node count"
+assert_eq ScenarioReceptacle "$($BSPC query -T -n @/ | jq -r '.client.className')" "client inserted into receptacle"
+close_test_window "$receptacle_client"

@@ -1,0 +1,17 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+$BSPC monitor --reset-desktops transfer-a transfer-b
+$BSPC desktop transfer-a --focus
+xid=$(add_test_window transfer ScenarioTransfer)
+$BSPC node "$xid" --to-desktop transfer-b --follow
+
+assert_eq transfer-b "$($BSPC query -D -d focused --names)" "focused desktop after transfer"
+assert_eq "$xid" "$($BSPC query -N -d transfer-b)" "client on destination desktop"
+if $BSPC query -N -d transfer-a >/dev/null 2>&1; then
+	fail "source desktop still contains a node"
+fi
+
+close_test_window "$xid"
+$BSPC monitor --reset-desktops Desktop

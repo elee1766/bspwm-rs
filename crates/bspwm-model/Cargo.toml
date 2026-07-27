@@ -1,0 +1,18 @@
+[package]
+name = "bspwm-model"
+version = "0.9.12"
+edition = "2024"
+license = "BSD-2-Clause"
+description = "Pure tree, world, history, stacking, and arrangement model for bspwm-rs"
+
+[dependencies]
+bspwm-core = { version = "0.9.12", path = "../bspwm-core" }
+slotmap = "1"
+thiserror = "2"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

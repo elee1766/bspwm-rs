@@ -1,0 +1,20 @@
+[package]
+name = "bspwm-core"
+version = "0.9.12"
+edition = "2024"
+license = "BSD-2-Clause"
+description = "Core protocol types, parsing, settings, and geometry for bspwm-rs"
+
+[dependencies]
+bitflags = "2"
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

@@ -1,0 +1,126 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+old_border_width=$($BSPC config border_width)
+old_window_gap=$($BSPC config window_gap)
+old_focused_border_color=$($BSPC config focused_border_color)
+old_top_padding=$($BSPC config top_padding)
+old_right_padding=$($BSPC config right_padding)
+old_bottom_padding=$($BSPC config bottom_padding)
+old_left_padding=$($BSPC config left_padding)
+
+$BSPC config border_width 0
+$BSPC config window_gap 0
+$BSPC config top_padding 0
+$BSPC config right_padding 0
+$BSPC config bottom_padding 0
+$BSPC config left_padding 0
+$BSPC desktop focused --layout tiled
+
+monitor_tree=$($BSPC query -T -m focused)
+monitor_width=$(printf '%s' "$monitor_tree" | jq -r '.rectangle.width')
+monitor_height=$(printf '%s' "$monitor_tree" | jq -r '.rectangle.height')
+monitor_x=$(printf '%s' "$monitor_tree" | jq -r '.rectangle.x')
+monitor_y=$(printf '%s' "$monitor_tree" | jq -r '.rectangle.y')
+
+first=$(add_test_window layout-a ScenarioLayout '#D1495B')
+second=$(add_test_window layout-b ScenarioLayout '#30638E')
+
+assert_model_rectangles() {
+	phase=$1
+	for window in "$first" "$second"; do
+		if [ "$window" = "$first" ]; then
+			label=first
+		else
+			label=second
+		fi
+		poll_until 50 0.02 x_matches_model_rectangle "$window" \
+			|| fail "$label $phase X geometry differs from model"
+	done
+}
+
+first_tiled_width=$(x_window_width "$first")
+second_tiled_width=$(x_window_width "$second")
+assert_eq "$monitor_width" "$((first_tiled_width + second_tiled_width))" "tiled windows fill monitor width"
+assert_eq "$monitor_height" "$(x_window_height "$first")" "first tiled height"
+assert_eq "$monitor_height" "$(x_window_height "$second")" "second tiled height"
+assert_ne "$(x_window_x "$first")" "$(x_window_x "$second")" "tiled windows have distinct positions"
+assert_eq "$first_tiled_width" "$($BSPC query -T -n "$first" | jq -r '.rectangle.width')" "model and X tiled width"
+assert_eq IsViewable "$(x_window_map_state "$first")" "first window is mapped"
+assert_model_rectangles tiled
+
+first_center_x=$(( $(x_window_x "$first") + $(x_window_width "$first") / 2 ))
+first_center_y=$(( $(x_window_y "$first") + $(x_window_height "$first") / 2 ))
+assert_eq '#D1495B' "$(x_pixel "$first_center_x" "$first_center_y")" "first client background pixel"
+
+$BSPC config window_gap 20
+assert_model_rectangles gapped
+first_right=$(( $(x_window_x "$first") + $(x_window_width "$first") ))
+second_left=$(x_window_x "$second")
+gap_x=$(( (first_right + second_left) / 2 ))
+gap_y=$((monitor_height / 2))
+assert_eq '#000000' "$(x_pixel "$gap_x" "$gap_y")" "window gap exposes root background"
+
+$BSPC config focused_border_color '#11CC55'
+$BSPC config border_width 4
+$BSPC node "$first" --focus
+poll_until 50 0.02 window_has_border_width "$first" 4 || fail "focused border width was not applied"
+border_x=$(( $(x_window_x "$first") + 1 ))
+border_y=$(( $(x_window_y "$first") + $(x_window_height "$first") / 2 ))
+assert_eq '#11CC55' "$(x_pixel "$border_x" "$border_y")" "focused border pixel"
+
+$BSPC config border_width 0
+$BSPC config window_gap 0
+assert_model_rectangles zero-gap
+
+$BSPC node "$first" --state floating
+floating_tree=$($BSPC query -T -n "$first")
+floating_width=$(printf '%s' "$floating_tree" | jq -r '.client.floatingRectangle.width')
+floating_height=$(printf '%s' "$floating_tree" | jq -r '.client.floatingRectangle.height')
+poll_until 50 0.02 window_has_geometry "$first" "$floating_width" "$floating_height" \
+	|| fail "X geometry $(x_window_width "$first")x$(x_window_height "$first") differs from model ${floating_width}x${floating_height}"
+assert_eq floating "$(printf '%s' "$floating_tree" | jq -r '.client.state')" "floating state"
+assert_ne "$first_tiled_width" "$floating_width" "floating width differs from tiled partition"
+assert_eq "$monitor_width" "$(x_window_width "$second")" "remaining tiled window fills monitor"
+assert_eq "$monitor_height" "$(x_window_height "$second")" "remaining tiled window fills monitor height"
+
+$BSPC node "$first" --state fullscreen
+poll_until 50 0.02 window_has_geometry "$first" "$monitor_width" "$monitor_height" \
+	|| fail "fullscreen window did not cover monitor"
+assert_eq fullscreen "$($BSPC query -T -n "$first" | jq -r '.client.state')" "fullscreen state"
+assert_eq 0 "$(x_window_border_width "$first")" "fullscreen border width"
+assert_eq "$monitor_x" "$(x_window_x "$first")" "fullscreen monitor x origin"
+assert_eq "$monitor_y" "$(x_window_y "$first")" "fullscreen monitor y origin"
+assert_eq '#D1495B' "$(x_pixel "$monitor_x" "$monitor_y")" "fullscreen has no edge gap"
+poll_until 50 0.02 x_window_above "$first" "$second" \
+	|| fail "fullscreen window is not above tiled window in X stack (first=$(x_stack_index "$first"), second=$(x_stack_index "$second"))"
+
+$BSPC node "$first" --state tiled
+$BSPC desktop focused --layout monocle
+for window in "$first" "$second"; do
+	if [ "$window" = "$first" ]; then
+		label=first
+	else
+		label=second
+	fi
+	poll_until 50 0.02 window_has_geometry "$window" "$monitor_width" "$monitor_height" \
+		|| fail "$label monocle window is $(x_window_width "$window")x$(x_window_height "$window"), expected ${monitor_width}x${monitor_height}"
+done
+assert_eq monocle "$($BSPC query -T -d focused | jq -r '.layout')" "monocle model layout"
+
+$BSPC desktop focused --layout tiled
+poll_until 50 0.02 window_has_geometry "$first" "$first_tiled_width" "$monitor_height" \
+	|| fail "first window did not return to tiled geometry"
+assert_eq tiled "$($BSPC query -T -d focused | jq -r '.layout')" "restored tiled model layout"
+
+close_test_window "$second"
+close_test_window "$first"
+
+$BSPC config border_width "$old_border_width"
+$BSPC config window_gap "$old_window_gap"
+$BSPC config focused_border_color "$old_focused_border_color"
+$BSPC config top_padding "$old_top_padding"
+$BSPC config right_padding "$old_right_padding"
+$BSPC config bottom_padding "$old_bottom_padding"
+$BSPC config left_padding "$old_left_padding"

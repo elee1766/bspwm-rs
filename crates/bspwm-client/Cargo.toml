@@ -1,0 +1,13 @@
+[package]
+name = "bspwm-client"
+version = "0.9.12"
+edition = "2024"
+license = "BSD-2-Clause"
+description = "Client library and command-line client for bspwm"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

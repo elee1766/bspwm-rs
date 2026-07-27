@@ -1,0 +1,26 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+# Scenario 04 covers `subscribe --fifo`. This one covers the socket transport,
+# where records are streamed back over the same connection that carried the
+# request. `bspc` half-closes its write side once the request is sent, so the
+# daemon must not mistake that for the subscriber going away.
+
+events=$TEST_TMP/socket-subscription.events
+$BSPC subscribe --count 2 node_add node_remove > "$events" &
+reader_pid=$!
+
+# Give the subscriber time to register before generating any records.
+poll_until 100 0.05 test -e "$events" || fail "subscriber did not start"
+
+first=$(add_test_window first ScenarioSocketSubscribe)
+close_test_window "$first"
+
+poll_until 100 0.05 process_exited "$reader_pid" \
+	|| fail "socket subscription did not reach its exact count"
+wait "$reader_pid"
+
+assert_eq 2 "$(wc -l < "$events" | tr -d ' ')" "socket subscription event count"
+assert_eq 1 "$(grep -c '^node_add ' "$events")" "node_add count"
+assert_eq 1 "$(grep -c '^node_remove ' "$events")" "node_remove count"

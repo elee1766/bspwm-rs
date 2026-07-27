@@ -1,0 +1,83 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+window_has_map_state() {
+	[ "$(x_window_map_state "$1")" = "$2" ]
+}
+
+original_monitor=$($BSPC query -M -m focused --names)
+original_tree=$($BSPC query -T -m focused)
+original_geometry=$(printf '%s' "$original_tree" | jq -r \
+	'"\(.rectangle.width)x\(.rectangle.height)+\(.rectangle.x)+\(.rectangle.y)"')
+
+$BSPC monitor focused --rename e2e-left --rectangle 512x768+0+0
+$BSPC monitor e2e-left --reset-desktops left-a left-b
+$BSPC desktop left-a --focus
+
+left_first=$(add_test_window left-first ScenarioSwitching)
+left_second=$(add_test_window left-second ScenarioSwitching)
+$BSPC node "$left_first" --focus
+
+$BSPC desktop left-b --focus
+poll_until 50 0.02 window_has_map_state "$left_first" IsUnMapped \
+	|| fail "first left-a window stayed mapped after switching to left-b"
+poll_until 50 0.02 window_has_map_state "$left_second" IsUnMapped \
+	|| fail "second left-a window stayed mapped after switching to left-b"
+left_b=$(add_test_window left-b ScenarioSwitching)
+assert_eq IsViewable "$(x_window_map_state "$left_b")" "left-b window is visible"
+
+$BSPC desktop left-a --focus
+poll_until 50 0.02 window_has_map_state "$left_first" IsViewable \
+	|| fail "first left-a window was not remapped"
+poll_until 50 0.02 window_has_map_state "$left_second" IsViewable \
+	|| fail "second left-a window was not remapped"
+poll_until 50 0.02 window_has_map_state "$left_b" IsUnMapped \
+	|| fail "left-b window stayed mapped after switching to left-a"
+assert_eq "$left_first" "$($BSPC query -N -n focused)" "desktop focus restored after switching back"
+
+$BSPC wm --add-monitor e2e-right 512x768+512+0
+$BSPC monitor e2e-right --reset-desktops right-a right-b
+$BSPC monitor e2e-right --focus
+assert_eq e2e-right "$($BSPC query -M -m focused --names)" "focused monitor after switching right"
+right_a=$(add_test_window right-a ScenarioSwitching)
+poll_until 50 0.02 window_has_map_state "$left_first" IsViewable \
+	|| fail "active left monitor window was hidden when the right monitor gained focus"
+[ "$(x_window_x "$right_a")" -ge 512 ] || fail "right monitor window is outside its monitor"
+
+$BSPC monitor e2e-left --focus
+assert_eq e2e-left "$($BSPC query -M -m focused --names)" "focused monitor after switching left"
+assert_eq left-a "$($BSPC query -D -d focused --names)" "left monitor retained its active desktop"
+assert_eq "$left_first" "$($BSPC query -N -n focused)" "left monitor restored its focused node"
+
+$BSPC node "$left_first" --to-desktop right-b --follow
+assert_eq e2e-right "$($BSPC query -M -m focused --names)" "cross-monitor transfer followed destination monitor"
+assert_eq right-b "$($BSPC query -D -d focused --names)" "cross-monitor transfer followed destination desktop"
+assert_eq "$left_first" "$($BSPC query -N -d right-b)" "transferred client is on right-b"
+assert_eq "$left_second" "$($BSPC query -N -d left-a)" "source desktop retained its other client"
+poll_until 50 0.02 window_has_map_state "$right_a" IsUnMapped \
+	|| fail "right-a window stayed mapped while right-b was active"
+poll_until 50 0.02 window_has_map_state "$left_first" IsViewable \
+	|| fail "transferred client was not mapped on right-b"
+[ "$(x_window_x "$left_first")" -ge 512 ] || fail "transferred client geometry was not adapted to the right monitor"
+
+$BSPC desktop right-a --focus
+poll_until 50 0.02 window_has_map_state "$right_a" IsViewable \
+	|| fail "right-a window was not remapped"
+poll_until 50 0.02 window_has_map_state "$left_first" IsUnMapped \
+	|| fail "right-b window stayed mapped while right-a was active"
+$BSPC desktop right-b --focus
+poll_until 50 0.02 window_has_map_state "$left_first" IsViewable \
+	|| fail "right-b window was not remapped"
+
+close_test_window "$left_first"
+$BSPC desktop right-a --focus
+close_test_window "$right_a"
+$BSPC monitor e2e-left --focus
+close_test_window "$left_second"
+$BSPC desktop left-b --focus
+close_test_window "$left_b"
+
+$BSPC monitor e2e-right --remove
+$BSPC monitor e2e-left --rectangle "$original_geometry" --rename "$original_monitor"
+$BSPC monitor "$original_monitor" --reset-desktops Desktop

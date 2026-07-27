@@ -1,0 +1,199 @@
+#!/bin/sh
+
+fail() {
+	printf 'FAIL: %s\n' "$*" >&2
+	exit 1
+}
+
+assert_eq() {
+	[ "$1" = "$2" ] || fail "${3:-values differ}: expected '$1', got '$2'"
+}
+
+assert_ne() {
+	[ "$1" != "$2" ] || fail "${3:-values unexpectedly match}: both were '$1'"
+}
+
+assert_contains() {
+	case $1 in
+		*"$2"*) ;;
+		*) fail "${3:-value does not contain substring}: '$1' does not contain '$2'" ;;
+	esac
+}
+
+# Usage: poll_until ATTEMPTS SLEEP_SECONDS command [argument ...]
+poll_until() {
+	poll_attempts=$1
+	poll_sleep=$2
+	shift 2
+	while [ "$poll_attempts" -gt 0 ]; do
+		if "$@"; then
+			return 0
+		fi
+		poll_attempts=$((poll_attempts - 1))
+		sleep "$poll_sleep"
+	done
+	return 1
+}
+
+node_count() {
+	count=$($BSPC query -N 2>/dev/null | wc -l)
+	printf '%s\n' "$count" | tr -d ' '
+}
+
+node_exists() {
+	$BSPC query -N -n "$1" >/dev/null 2>&1
+}
+
+node_missing() {
+	! node_exists "$1"
+}
+
+file_has_line() {
+	[ -s "$1" ]
+}
+
+x_window_width() {
+	xwininfo -id "$1" | awk -F: '/Width:/ { gsub(/[[:space:]]/, "", $2); print $2; exit }'
+}
+
+x_window_height() {
+	xwininfo -id "$1" | awk -F: '/Height:/ { gsub(/[[:space:]]/, "", $2); print $2; exit }'
+}
+
+x_window_border_width() {
+	xwininfo -id "$1" | awk -F: '/Border width:/ { gsub(/[[:space:]]/, "", $2); print $2; exit }'
+}
+
+x_pixel() {
+	"$X_PIXEL" "$1" "$2"
+}
+
+x_window_x() {
+	xwininfo -id "$1" | awk -F: '/Absolute upper-left X:/ { gsub(/[[:space:]]/, "", $2); print $2; exit }'
+}
+
+x_window_y() {
+	xwininfo -id "$1" | awk -F: '/Absolute upper-left Y:/ { gsub(/[[:space:]]/, "", $2); print $2; exit }'
+}
+
+x_window_map_state() {
+	xwininfo -id "$1" | awk -F: '/Map State:/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }'
+}
+
+x_stack_index() {
+	normalized_xid=$(printf '0x%x' "$(( $1 ))")
+	xwininfo -root -tree | awk -v xid="$normalized_xid" 'index(tolower($0), tolower(xid)) { print NR; exit }'
+}
+
+x_window_above() {
+	first_index=$(x_stack_index "$1")
+	second_index=$(x_stack_index "$2")
+	# xwininfo prints each sibling group from topmost to bottommost.
+	[ -n "$first_index" ] && [ -n "$second_index" ] && [ "$first_index" -lt "$second_index" ]
+}
+
+window_has_geometry() {
+	[ "$(x_window_width "$1")" = "$2" ] && [ "$(x_window_height "$1")" = "$3" ]
+}
+
+window_has_full_geometry() {
+	[ "$(x_window_x "$1")" = "$2" ] \
+		&& [ "$(x_window_y "$1")" = "$3" ] \
+		&& [ "$(x_window_width "$1")" = "$4" ] \
+		&& [ "$(x_window_height "$1")" = "$5" ]
+}
+
+window_has_border_width() {
+	[ "$(x_window_border_width "$1")" = "$2" ]
+}
+
+x_matches_model_rectangle() {
+	xid=$1
+	model=$($BSPC query -T -n "$xid")
+	model_rectangle=$(printf '%s' "$model" | jq -c \
+		'if .client.state == "floating" then .client.floatingRectangle else .client.tiledRectangle end')
+	[ "$(x_window_x "$xid")" = "$(printf '%s' "$model_rectangle" | jq -r '.x')" ] \
+		&& [ "$(x_window_y "$xid")" = "$(printf '%s' "$model_rectangle" | jq -r '.y')" ] \
+		&& [ "$(x_window_width "$xid")" = "$(printf '%s' "$model_rectangle" | jq -r '.width')" ] \
+		&& [ "$(x_window_height "$xid")" = "$(printf '%s' "$model_rectangle" | jq -r '.height')" ]
+}
+
+process_exited() {
+	! kill -0 "$1" 2>/dev/null
+}
+
+# Starts a client, records its PID for runner cleanup, waits for management, and prints its XID.
+add_test_window() {
+	window_instance=${1:-test}
+	window_class=${2:-Test}
+	window_number=$(($(wc -l < "$TEST_WINDOW_PIDS") + 1))
+	case $((window_number % 8)) in
+		1) default_window_color='#D1495B' ;;
+		2) default_window_color='#00798C' ;;
+		3) default_window_color='#EDAe49' ;;
+		4) default_window_color='#30638E' ;;
+		5) default_window_color='#6A4C93' ;;
+		6) default_window_color='#2A9D8F' ;;
+		7) default_window_color='#E76F51' ;;
+		0) default_window_color='#577590' ;;
+	esac
+	window_color=${3:-$default_window_color}
+	window_xid_file=$TEST_TMP/window.$window_number.xid
+	"$TEST_WINDOW" "$window_instance" "$window_class" "$window_color" >"$window_xid_file" \
+		2>>"$TEST_WINDOW_LOG" &
+	window_pid=$!
+	printf '%s\n' "$window_pid" >> "$TEST_WINDOW_PIDS"
+	poll_until 100 0.05 file_has_line "$window_xid_file" || fail "test window did not print an XID"
+	window_xid=$(sed -n '1p' "$window_xid_file")
+	poll_until 100 0.05 node_exists "$window_xid" || fail "window $window_xid was not managed"
+	printf '%s\n' "$window_xid"
+}
+
+# Starts a command-controlled client and prints its managed XID.
+add_controlled_window() {
+	controlled_label=$1
+	controlled_instance=$2
+	controlled_class=$3
+	shift 3
+	controlled_color='#405D80'
+	if [ "$#" -gt 0 ]; then
+		case $1 in
+			--*) ;;
+			*) controlled_color=$1; shift ;;
+		esac
+	fi
+	controlled_control=$TEST_TMP/$controlled_label.control
+	controlled_events=$TEST_TMP/$controlled_label.events
+	controlled_xid_file=$TEST_TMP/$controlled_label.xid
+	: > "$controlled_control"
+	: > "$controlled_events"
+	"$TEST_WINDOW" "$controlled_instance" "$controlled_class" "$controlled_color" \
+		--control "$controlled_control" --events "$controlled_events" "$@" \
+		>"$controlled_xid_file" 2>>"$TEST_WINDOW_LOG" &
+	controlled_pid=$!
+	printf '%s\n' "$controlled_pid" >> "$TEST_WINDOW_PIDS"
+	poll_until 100 0.05 file_has_line "$controlled_xid_file" \
+		|| fail "controlled window $controlled_label did not print an XID"
+	controlled_xid=$(sed -n '1p' "$controlled_xid_file")
+	poll_until 100 0.05 node_exists "$controlled_xid" \
+		|| fail "controlled window $controlled_xid was not managed"
+	printf '%s\n' "$controlled_xid"
+}
+
+send_window_command() {
+	command_label=$1
+	shift
+	printf '%s\n' "$*" >> "$TEST_TMP/$command_label.control"
+}
+
+window_event_log_contains() {
+	event_label=$1
+	event_pattern=$2
+	grep -F "$event_pattern" "$TEST_TMP/$event_label.events" >/dev/null 2>&1
+}
+
+close_test_window() {
+	close_xid=$1
+	$BSPC node "$close_xid" --close || fail "could not close window $close_xid"
+	poll_until 100 0.05 node_missing "$close_xid" || fail "window $close_xid was not removed"
+}

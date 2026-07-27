@@ -1,0 +1,86 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+client_is_urgent() {
+	[ "$($BSPC query -T -n "$1" | jq -r '.client.urgent')" = true ]
+}
+
+client_is_not_urgent() {
+	[ "$($BSPC query -T -n "$1" | jq -r '.client.urgent')" = false ]
+}
+
+window_property_contains() {
+	xprop -id "$1" "$2" 2>/dev/null | grep -F "$3" >/dev/null
+}
+
+window_property_lacks() {
+	! window_property_contains "$1" "$2" "$3"
+}
+
+monitor_top_padding_is() {
+	[ "$($BSPC query -T -m focused | jq -r '.padding.top')" = "$1" ]
+}
+
+old_hints=$($BSPC config honor_size_hints)
+old_ignore_struts=$($BSPC config ignore_ewmh_struts)
+old_top_padding=$($BSPC config -m focused top_padding)
+old_border=$($BSPC config border_width)
+old_gap=$($BSPC config window_gap)
+$BSPC config border_width 0
+$BSPC config window_gap 0
+$BSPC monitor focused --reset-desktops hints-a hints-b
+$BSPC desktop hints-b --focus
+
+urgent=$(add_controlled_window urgent urgency ScenarioHints)
+$BSPC desktop hints-a --focus
+send_window_command urgent urgency on
+poll_until 100 0.02 client_is_urgent "$urgent" || fail "WM_HINTS urgency was not applied"
+poll_until 100 0.02 window_property_contains "$urgent" _NET_WM_STATE _NET_WM_STATE_DEMANDS_ATTENTION \
+	|| fail "urgent client lacks _NET_WM_STATE_DEMANDS_ATTENTION"
+$BSPC desktop hints-b --focus
+poll_until 100 0.02 client_is_not_urgent "$urgent" || fail "focusing urgent client did not clear urgency"
+poll_until 100 0.02 window_property_lacks "$urgent" _NET_WM_STATE _NET_WM_STATE_DEMANDS_ATTENTION \
+	|| fail "demands-attention state remained after focus"
+
+$BSPC config honor_size_hints true
+$BSPC node "$urgent" --state floating
+send_window_command urgent normal-hints 200 150 200 150
+send_window_command urgent configure 80 90 400 400
+poll_until 100 0.02 window_has_geometry "$urgent" 200 150 \
+	|| fail "dynamic fixed-size WM_NORMAL_HINTS were not honored"
+assert_eq 200 "$($BSPC query -T -n "$urgent" | jq -r '.client.floatingRectangle.width')" "hinted model width"
+assert_eq 150 "$($BSPC query -T -n "$urgent" | jq -r '.client.floatingRectangle.height')" "hinted model height"
+
+$BSPC config -m focused top_padding 0
+$BSPC config ignore_ewmh_struts true
+strut=$(add_controlled_window strut strut ScenarioStrut)
+$BSPC node "$strut" --state floating
+content=$(add_test_window strut-content ScenarioStrut)
+: > "$TEST_TMP/strut.events"
+send_window_command strut strut 0 0 40 0 0 0 0 0 0 1023 0 0
+send_window_command strut configure 10 10 201 101
+poll_until 100 0.02 window_has_full_geometry "$strut" 10 10 201 101 \
+	|| fail "ignored-strut synchronization configure was not processed"
+assert_eq 0 "$($BSPC query -T -m focused | jq -r '.padding.top')" "ignored strut left padding unchanged"
+
+$BSPC config ignore_ewmh_struts false
+: > "$TEST_TMP/strut.events"
+send_window_command strut strut 0 0 40 0 0 0 0 0 0 1023 0 0
+send_window_command strut configure 11 11 202 102
+poll_until 100 0.02 window_has_full_geometry "$strut" 11 11 202 102 \
+	|| fail "live-strut synchronization configure was not processed"
+poll_until 100 0.02 monitor_top_padding_is 40 || fail "live strut did not reserve top padding"
+poll_until 100 0.02 x_matches_model_rectangle "$content" \
+	|| fail "strut rearrangement did not reach the X window"
+[ "$(x_window_y "$content")" -ge 40 ] || fail "tiled client overlaps the reserved top strut"
+
+close_test_window "$content"
+close_test_window "$strut"
+close_test_window "$urgent"
+$BSPC config -m focused top_padding "$old_top_padding"
+$BSPC config honor_size_hints "$old_hints"
+$BSPC config ignore_ewmh_struts "$old_ignore_struts"
+$BSPC config border_width "$old_border"
+$BSPC config window_gap "$old_gap"
+$BSPC monitor focused --reset-desktops Desktop

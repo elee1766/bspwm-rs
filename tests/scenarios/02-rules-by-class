@@ -1,0 +1,11 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+$BSPC rule --add ScenarioRule:scenario --one-shot state=floating
+xid=$(add_test_window scenario ScenarioRule)
+tree=$($BSPC query -T -n "$xid")
+assert_eq ScenarioRule "$(printf '%s' "$tree" | jq -r '.client.className')" "rule class"
+assert_eq scenario "$(printf '%s' "$tree" | jq -r '.client.instanceName')" "rule instance"
+assert_eq floating "$(printf '%s' "$tree" | jq -r '.client.state')" "class rule state"
+close_test_window "$xid"

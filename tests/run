@@ -1,0 +1,143 @@
+#!/bin/sh
+
+set -u
+
+TEST_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PROJECT_ROOT=$(CDPATH= cd -- "$TEST_ROOT/.." && pwd)
+HOST_DISPLAY=${DISPLAY:-}
+export TEST_ROOT PROJECT_ROOT
+
+die() {
+	printf 'ERROR: %s\n' "$*" >&2
+	exit 2
+}
+
+for dependency in cargo Xephyr jq mktemp xdpyinfo xprop xwininfo; do
+	command -v "$dependency" >/dev/null 2>&1 || die "missing dependency: $dependency"
+done
+
+printf 'Building bspwm-rs, bspc-rs, and X test utilities...\n'
+(cd "$PROJECT_ROOT" && cargo build --workspace --bins --examples) || die "build failed"
+
+BSPWM=$PROJECT_ROOT/target/debug/bspwm-rs
+BSPC=$PROJECT_ROOT/target/debug/bspc-rs
+TEST_WINDOW=$PROJECT_ROOT/target/debug/examples/test_window
+X_PIXEL=$PROJECT_ROOT/target/debug/examples/x_pixel
+X_MESSAGE=$PROJECT_ROOT/target/debug/examples/x_message
+export BSPWM BSPC TEST_WINDOW X_PIXEL X_MESSAGE
+
+display_number=
+candidate=90
+while [ "$candidate" -le 199 ]; do
+	if [ ! -e "/tmp/.X11-unix/X$candidate" ] \
+		&& [ ! -e "/tmp/.X$candidate-lock" ] \
+		&& ! xdpyinfo -display ":$candidate" >/dev/null 2>&1; then
+		display_number=$candidate
+		break
+	fi
+	candidate=$((candidate + 1))
+done
+[ -n "$display_number" ] || die "no free X display found"
+
+TEST_TMP=$(mktemp -d "${TMPDIR:-/tmp}/bspwm-rs-tests.XXXXXX") || die "could not create temp directory"
+DISPLAY=:$display_number
+BSPWM_SOCKET=$TEST_TMP/bspwm.sock
+XDG_CONFIG_HOME=$TEST_TMP/config
+TEST_WINDOW_PIDS=$TEST_TMP/window-pids
+TEST_WINDOW_LOG=$TEST_TMP/test-window.log
+BSPWM_LOG=$TEST_TMP/bspwm.log
+XEPHYR_LOG=$TEST_TMP/xephyr.log
+STATE_PATH=/tmp/bspwm_${display_number}_0-state
+export TEST_TMP DISPLAY BSPWM_SOCKET XDG_CONFIG_HOME TEST_WINDOW_PIDS TEST_WINDOW_LOG BSPWM_LOG XEPHYR_LOG
+: > "$TEST_WINDOW_PIDS"
+: > "$TEST_WINDOW_LOG"
+mkdir "$XDG_CONFIG_HOME"
+
+xephyr_pid=
+bspwm_pid=
+cleaned=false
+cleanup() {
+	[ "$cleaned" = false ] || return
+	cleaned=true
+	if [ -f "$TEST_WINDOW_PIDS" ]; then
+		while IFS= read -r pid; do
+			[ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+		done < "$TEST_WINDOW_PIDS"
+	fi
+	[ -z "$bspwm_pid" ] || kill "$bspwm_pid" 2>/dev/null || true
+	[ -z "$xephyr_pid" ] || kill "$xephyr_pid" 2>/dev/null || true
+	sleep 0.1
+	if [ -f "$TEST_WINDOW_PIDS" ]; then
+		while IFS= read -r pid; do
+			[ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
+		done < "$TEST_WINDOW_PIDS"
+	fi
+	[ -z "$bspwm_pid" ] || kill -9 "$bspwm_pid" 2>/dev/null || true
+	[ -z "$xephyr_pid" ] || kill -9 "$xephyr_pid" 2>/dev/null || true
+	rm -f "$BSPWM_SOCKET" "$STATE_PATH"
+	if [ "${KEEP_TEST_ENV:-0}" = 1 ]; then
+		printf 'Preserved test logs in %s\n' "$TEST_TMP"
+	else
+		rm -rf "$TEST_TMP"
+	fi
+}
+trap cleanup EXIT HUP INT TERM
+
+DISPLAY=$HOST_DISPLAY Xephyr "$DISPLAY" -screen 1024x768 -nolisten tcp -noreset >"$XEPHYR_LOG" 2>&1 &
+xephyr_pid=$!
+attempts=100
+while ! DISPLAY=$DISPLAY xdpyinfo >/dev/null 2>&1; do
+	kill -0 "$xephyr_pid" 2>/dev/null || die "Xephyr exited; see $XEPHYR_LOG"
+	[ "$attempts" -gt 0 ] || die "timed out waiting for Xephyr; see $XEPHYR_LOG"
+	attempts=$((attempts - 1))
+	sleep 0.05
+done
+
+"$BSPWM" >"$BSPWM_LOG" 2>&1 &
+bspwm_pid=$!
+attempts=100
+while ! "$BSPC" query -M >/dev/null 2>&1; do
+	kill -0 "$bspwm_pid" 2>/dev/null || die "bspwm exited; see $BSPWM_LOG"
+	[ "$attempts" -gt 0 ] || die "timed out waiting for bspwm; see $BSPWM_LOG"
+	attempts=$((attempts - 1))
+	sleep 0.05
+done
+
+if [ "$#" -eq 0 ]; then
+	set -- "$TEST_ROOT"/scenarios/*
+else
+	selected=
+	for name do
+		case $name in
+			*/*) scenario=$name ;;
+			*) scenario=$TEST_ROOT/scenarios/$name ;;
+		esac
+		[ -x "$scenario" ] || die "scenario is not executable: $name"
+		selected="$selected $scenario"
+	done
+	# Scenario paths cannot contain spaces because this is a POSIX shell word list.
+	set -- $selected
+fi
+
+passed=0
+failed=0
+for scenario do
+	[ -x "$scenario" ] || continue
+	name=$(basename "$scenario")
+	printf '[ RUN  ] %s\n' "$name"
+	if "$scenario"; then
+		printf '[ PASS ] %s\n' "$name"
+		passed=$((passed + 1))
+	else
+		printf '[ FAIL ] %s\n' "$name" >&2
+		failed=$((failed + 1))
+		break
+	fi
+done
+
+printf '\n%d passed, %d failed\n' "$passed" "$failed"
+if [ "${PAUSE_TEST_ENV:-0}" = 1 ]; then
+	printf 'Paused with DISPLAY=%s BSPWM_SOCKET=%s\nPress Enter to clean up.\n' "$DISPLAY" "$BSPWM_SOCKET"
+	read -r _pause
+fi
+[ "$failed" -eq 0 ]
