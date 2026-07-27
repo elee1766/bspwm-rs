@@ -2,11 +2,17 @@
 
 a behavior-compatible rust ai rewrite of [bspwm](https://github.com/baskerville/bspwm).
 
-it should act mostly the same. there are some implementation differences tho
+documentation that works for bspwm should work for bspwm-rs
+
+you should even be able to use bspc with bspwm-rs with no issue.
+
+it should act mostly the same. there are some implementation differences ofc.
 
 please tell me / open issue if you find incompatiblities with bspwm ill try to fix it
 
 i might add some backwards compatible features (more commands) to it in the future. not sure
+
+supposedly https://github.com/baskerville/bspwm/issues/651 issue should be fixed here (hidden window thing maybe?)
 
 ## installation
 
