@@ -834,7 +834,7 @@ impl Tree {
 
     fn set_vacant(&mut self, node: NodeId, value: bool) {
         self.set_vacant_downward(node, value);
-        self.propagate_upward(node, |node| &mut node.vacant);
+        self.propagate_vacancy_upward(node);
     }
 
     pub fn sync_vacancy(&mut self, node: NodeId) {
@@ -849,7 +849,27 @@ impl Tree {
 
     fn set_vacant_downward(&mut self, node: NodeId, value: bool) {
         for id in self.preorder(node).collect::<Vec<_>>() {
-            self.node_mut(id).vacant = value;
+            self.set_vacant_local(id, value);
+        }
+    }
+
+    fn set_vacant_local(&mut self, node: NodeId, value: bool) {
+        if self.node(node).vacant == value {
+            return;
+        }
+        self.node_mut(node).vacant = value;
+        if value {
+            self.cancel_presel(node);
+        }
+    }
+
+    fn propagate_vacancy_upward(&mut self, node: NodeId) {
+        let mut current = node;
+        while let Some(parent) = self.node(current).parent {
+            let first = self.node(parent).first_child.expect("internal node");
+            let second = self.node(parent).second_child.expect("internal node");
+            self.set_vacant_local(parent, self.node(first).vacant && self.node(second).vacant);
+            current = parent;
         }
     }
 
@@ -868,7 +888,7 @@ impl Tree {
                 .as_ref()
                 .is_some_and(|client| client.state.is_tiled())
             {
-                self.node_mut(id).vacant = value;
+                self.set_vacant_local(id, value);
             }
         }
         // The recursion this replaces recomputed each branch's vacancy after
@@ -877,9 +897,10 @@ impl Tree {
             if let (Some(first), Some(second)) =
                 (self.node(id).first_child, self.node(id).second_child)
             {
-                self.node_mut(id).vacant = self.node(first).vacant && self.node(second).vacant;
+                self.set_vacant_local(id, self.node(first).vacant && self.node(second).vacant);
             }
         }
+        self.propagate_vacancy_upward(node);
     }
 
     #[allow(clippy::missing_panics_doc)]
@@ -1248,6 +1269,66 @@ impl Tree {
     #[must_use]
     pub fn private_count(&self, root: NodeId) -> u32 {
         self.flag_count(root, |node| node.private)
+    }
+
+    #[must_use]
+    pub fn placement_rectangle(&self, node: NodeId, window_gap: i32) -> Rectangle {
+        let value = self.node(node);
+        if let Some(client) = value.client.as_ref() {
+            if client.state == ClientState::Floating {
+                client.floating_rectangle
+            } else {
+                client.tiled_rectangle
+            }
+        } else {
+            Rectangle {
+                width: value.rectangle.width.saturating_sub(window_gap),
+                height: value.rectangle.height.saturating_sub(window_gap),
+                ..value.rectangle
+            }
+        }
+    }
+
+    /// Finds upstream's preferred non-private insertion leaf.
+    #[must_use]
+    pub fn find_public(&self, root: NodeId, window_gap: i32) -> Option<NodeId> {
+        let mut manual = None;
+        let mut manual_area = 0;
+        let mut automatic = None;
+        let mut automatic_area = 0;
+        for node in self.leaves(root) {
+            let value = self.node(node);
+            if value.vacant {
+                continue;
+            }
+            let area = crate::geometry::area(self.placement_rectangle(node, window_gap));
+            if area > manual_area && (value.presel.is_some() || !value.private) {
+                manual = Some(node);
+                manual_area = area;
+            }
+            let private_in_parent = value
+                .parent
+                .is_some_and(|parent| self.private_count(parent) > 0);
+            if area > automatic_area
+                && value.presel.is_none()
+                && !value.private
+                && !private_in_parent
+            {
+                automatic = Some(node);
+                automatic_area = area;
+            }
+        }
+        automatic.or(manual)
+    }
+
+    #[must_use]
+    pub fn is_protected_insertion_anchor(&self, node: NodeId) -> bool {
+        let value = self.node(node);
+        value.presel.is_none()
+            && (value.private
+                || value
+                    .parent
+                    .is_some_and(|parent| self.private_count(parent) > 0))
     }
 
     #[must_use]
@@ -1819,6 +1900,67 @@ mod tests {
             assert_eq!(tree.node(branch).split_type, expected);
             assert_eq!(tree.validate(state.root.unwrap()), Ok(()));
         }
+    }
+
+    #[test]
+    fn find_public_prefers_clean_automatic_leaves_over_larger_manual_ones() {
+        let settings = Settings::default();
+        let (mut tree, root, [automatic, other, manual, private], _) = balanced_tree();
+        for leaf in [automatic, other, manual, private] {
+            tree.node_mut(leaf).client = Some(Client::from_settings(&settings));
+        }
+        tree.node_mut(automatic)
+            .client
+            .as_mut()
+            .unwrap()
+            .tiled_rectangle = Rectangle::new(0, 0, 10, 10);
+        tree.node_mut(other)
+            .client
+            .as_mut()
+            .unwrap()
+            .tiled_rectangle = Rectangle::new(0, 0, 5, 10);
+        tree.node_mut(manual)
+            .client
+            .as_mut()
+            .unwrap()
+            .tiled_rectangle = Rectangle::new(0, 0, 100, 100);
+        tree.node_mut(private).private = true;
+
+        assert_eq!(tree.find_public(root, 0), Some(automatic));
+        tree.node_mut(automatic).vacant = true;
+        assert_eq!(tree.find_public(root, 0), Some(other));
+    }
+
+    #[test]
+    fn making_a_subtree_vacant_cancels_its_preselections() {
+        let settings = Settings::default();
+        let (mut tree, root, leaves @ [first, second, _, _], _) = balanced_tree();
+        for leaf in leaves {
+            tree.node_mut(leaf).client = Some(Client::from_settings(&settings));
+        }
+        tree.node_mut(root).presel = Some(Presel {
+            split_dir: Direction::East,
+            split_ratio: 0.5,
+            feedback: Some(10),
+        });
+        tree.node_mut(first).presel = Some(Presel {
+            split_dir: Direction::South,
+            split_ratio: 0.3,
+            feedback: Some(11),
+        });
+        tree.node_mut(second).presel = Some(Presel {
+            split_dir: Direction::North,
+            split_ratio: 0.7,
+            feedback: Some(12),
+        });
+
+        assert!(tree.set_flag(root, NodeFlag::Hidden, true));
+        assert!(tree.node(root).presel.is_none());
+        assert!(tree.node(first).presel.is_none());
+        assert!(tree.node(second).presel.is_none());
+        let mut retired = tree.take_retired_feedbacks();
+        retired.sort_unstable();
+        assert_eq!(retired, vec![10, 11, 12]);
     }
 
     #[test]

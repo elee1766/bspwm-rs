@@ -2,6 +2,12 @@
 set -u
 . "$TEST_ROOT/prelude"
 
+active_window_is() {
+	property=$(xprop -root _NET_ACTIVE_WINDOW 2>/dev/null) || return 1
+	active=${property##* }
+	[ "$(printf '%d' "$active")" -eq "$(printf '%d' "$1")" ]
+}
+
 assert_eq 0 "$(node_count)" "initial node count"
 xid=$(add_test_window manage ScenarioManage)
 assert_eq 1 "$(node_count)" "node count after map"
@@ -11,5 +17,12 @@ assert_eq tiled "$(printf '%s' "$tree" | jq -r '.client.state')" "initial state"
 
 $BSPC node "$xid" --state floating
 assert_eq floating "$($BSPC query -T -n "$xid" | jq -r '.client.state')" "changed state"
+
+next=$(add_test_window manage-next ScenarioManageNext)
+assert_eq "$next" "$($BSPC query -N -n focused)" "new client focused"
+close_test_window "$next"
+assert_eq "$xid" "$($BSPC query -N -n focused)" "focus repaired after focused client closed"
+poll_until 50 0.02 active_window_is "$xid" \
+	|| fail "_NET_ACTIVE_WINDOW was not repaired after focused client closed"
 close_test_window "$xid"
 assert_eq 0 "$(node_count)" "node count after close"

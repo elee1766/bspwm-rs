@@ -279,8 +279,12 @@ impl CommandHandler<'_> {
                     else {
                         return fail(rsp, b"");
                     };
-                    if argument == b"cancel" {
-                        self.state.world.tree.cancel_presel(node);
+                    let status = if argument == b"cancel" {
+                        self.state
+                            .world
+                            .tree
+                            .cancel_presel(node)
+                            .map(|_| "cancel".to_owned())
                     } else {
                         let (alternate, direction) = argument
                             .strip_prefix(b"~")
@@ -297,14 +301,32 @@ impl CommandHandler<'_> {
                                 .presel
                                 .is_some_and(|presel| presel.split_dir == direction)
                         {
-                            self.state.world.tree.cancel_presel(node);
+                            self.state
+                                .world
+                                .tree
+                                .cancel_presel(node)
+                                .map(|_| "cancel".to_owned())
                         } else {
                             self.state.world.tree.set_presel_direction(
                                 node,
                                 direction,
                                 self.state.settings.split_ratio,
                             );
+                            Some(format!("dir {}", direction.protocol_name()))
                         }
+                    };
+                    if let (Some(status), Some(monitor), Some(desktop)) =
+                        (status, target.monitor, target.desktop)
+                    {
+                        self.broadcast(
+                            crate::types::SubscriberMask::NODE_PRESEL,
+                            format!(
+                                "node_presel 0x{:08X} 0x{:08X} 0x{:08X} {status}\n",
+                                self.state.world.monitor(monitor).external_id,
+                                self.state.world.desktop(desktop).external_id,
+                                self.state.world.tree.node(node).external_id,
+                            ),
+                        );
                     }
                     self.state
                         .pending_effects
@@ -336,6 +358,17 @@ impl CommandHandler<'_> {
                         ratio,
                         self.state.settings.split_ratio,
                     );
+                    if let (Some(monitor), Some(desktop)) = (target.monitor, target.desktop) {
+                        self.broadcast(
+                            crate::types::SubscriberMask::NODE_PRESEL,
+                            format!(
+                                "node_presel 0x{:08X} 0x{:08X} 0x{:08X} ratio {ratio:.6}\n",
+                                self.state.world.monitor(monitor).external_id,
+                                self.state.world.desktop(desktop).external_id,
+                                self.state.world.tree.node(node).external_id,
+                            ),
+                        );
+                    }
                     self.state
                         .pending_effects
                         .push(CommandEffect::SyncPreselFeedback {
@@ -408,7 +441,7 @@ impl CommandHandler<'_> {
                         return fail(rsp, b"");
                     };
                     let layout = self.state.world.desktop(desktop).layout;
-                    if !self.set_node_state(desktop, node, state) {
+                    if !self.set_node_state(monitor, desktop, node, state) {
                         return fail(rsp, b"");
                     }
                     self.arrange_effect(monitor, desktop);
@@ -498,7 +531,15 @@ impl CommandHandler<'_> {
                             target.desktop = Some(active);
                         }
                     }
+                    let presels = (flag == NodeFlag::Hidden)
+                        .then(|| target.desktop.map(|desktop| self.presel_snapshot(desktop)))
+                        .flatten();
                     if self.state.world.tree.set_flag(node, flag, value) {
+                        if let (Some(monitor), Some(desktop), Some(presels)) =
+                            (target.monitor, target.desktop, presels)
+                        {
+                            self.broadcast_cancelled_presels(monitor, desktop, presels);
+                        }
                         if flag == NodeFlag::Sticky
                             && let Some(monitor) = target.monitor
                         {
@@ -604,7 +645,6 @@ impl CommandHandler<'_> {
                         return fail(rsp, b"");
                     };
                     if let Some(monitor) = target.monitor {
-                        self.arrange_effect(monitor, desktop);
                         self.broadcast(
                             crate::types::SubscriberMask::NODE_ADD,
                             format!(
@@ -622,6 +662,28 @@ impl CommandHandler<'_> {
                         );
                         if self.state.world.desktop(desktop).tree.root == Some(receptacle) {
                             self.report_effect();
+                        }
+                        let previous = self.state.world.desktop(desktop).layout;
+                        let leave_single_monocle =
+                            self.state.settings.single_monocle
+                                && previous == crate::types::Layout::Monocle
+                                && self.state.world.desktop(desktop).tree.root.is_some_and(
+                                    |root| self.state.world.tree.tiled_count(root, true) > 1,
+                                );
+                        if leave_single_monocle {
+                            let user_layout = self.state.world.desktop(desktop).user_layout;
+                            if self.state.world.set_layout(
+                                desktop,
+                                user_layout,
+                                false,
+                                self.state.settings.single_monocle,
+                            ) {
+                                self.layout_effect(monitor, desktop, previous);
+                            } else {
+                                self.arrange_effect(monitor, desktop);
+                            }
+                        } else {
+                            self.arrange_effect(monitor, desktop);
                         }
                     }
                 }

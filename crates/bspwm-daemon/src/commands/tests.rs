@@ -897,6 +897,23 @@ fn node_preselection_commands_update_queryable_pure_state() {
 }
 
 #[test]
+fn vacancy_changes_publish_automatic_preselection_cancellation() {
+    let mut state = fixture();
+    assert!(run(&mut state, &[b"node", b"0x31", b"--presel-dir", b"east"]).is_empty());
+    state.pending_effects.clear();
+
+    assert!(run(&mut state, &[b"node", b"0x31", b"--state", b"floating"]).is_empty());
+    assert!(state.pending_effects.iter().any(|effect| {
+        matches!(
+            effect,
+            CommandEffect::Broadcast { mask, status, .. }
+                if *mask == crate::types::SubscriberMask::NODE_PRESEL
+                    && status.ends_with("0x00000031 cancel\n")
+        )
+    }));
+}
+
+#[test]
 fn x_backed_commands_queue_effects_and_diagnostics_are_byte_preserving() {
     let mut state = fixture();
     assert!(run(&mut state, &[b"node", b"--focus"]).is_empty());

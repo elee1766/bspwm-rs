@@ -12,8 +12,9 @@ use crate::rule::{
     parse_keys_values,
 };
 use crate::runtime::RuntimeError;
+use crate::state::CommandEffect;
 use crate::tree::{ChildPolarity, Client, IcccmProps, SizeHints};
-use crate::types::{Direction, Rectangle, SplitType, SubscriberMask, WmFlags};
+use crate::types::{Direction, Rectangle, SubscriberMask, WmFlags};
 use crate::window;
 use crate::world::{DesktopId, MonitorId};
 use crate::x11::X11;
@@ -83,11 +84,69 @@ impl DaemonApp {
         let monitor = target.monitor?;
         let desktop = target.desktop?;
         let was_empty = self.world().desktop(desktop).tree.root.is_none();
-        let anchor = target
+        let mut anchor = target
             .node
             .or(self.world().desktop(desktop).tree.focus)
             .or(self.world().desktop(desktop).tree.root);
         let split_ratio = self.state.settings.split_ratio;
+        if let Some(value) = anchor {
+            if let Some(direction) = consequence.split_dir {
+                self.tree_mut()
+                    .set_presel_direction(value, direction, split_ratio);
+                let status = format!(
+                    "node_presel {} dir {}\n",
+                    self.node_ids(monitor, desktop, value),
+                    direction.protocol_name(),
+                );
+                self.publish(SubscriberMask::NODE_PRESEL, &status);
+            }
+            if consequence.split_ratio != 0.0 {
+                self.tree_mut()
+                    .set_presel_ratio(value, consequence.split_ratio, split_ratio);
+                let status = format!(
+                    "node_presel {} ratio {:.6}\n",
+                    self.node_ids(monitor, desktop, value),
+                    consequence.split_ratio,
+                );
+                self.publish(SubscriberMask::NODE_PRESEL, &status);
+            }
+
+            let bare_receptacle = self.tree().is_leaf(value)
+                && self.node(value).client.is_none()
+                && self.node(value).presel.is_none();
+            if !bare_receptacle && self.tree().is_protected_insertion_anchor(value) {
+                let desktop_value = self.world().desktop(desktop);
+                let gap = if self.state.settings.gapless_monocle
+                    && desktop_value.layout == crate::types::Layout::Monocle
+                {
+                    0
+                } else {
+                    desktop_value.window_gap
+                };
+                if let Some(root) = desktop_value.tree.root
+                    && let Some(public) = self.tree().find_public(root, gap)
+                {
+                    anchor = Some(public);
+                }
+                let value = anchor.expect("the original anchor is present");
+                if self.tree().is_protected_insertion_anchor(value) {
+                    let rectangle = self.tree().placement_rectangle(value, gap);
+                    let direction = if rectangle.width >= rectangle.height {
+                        Direction::East
+                    } else {
+                        Direction::South
+                    };
+                    self.tree_mut()
+                        .set_presel_direction(value, direction, split_ratio);
+                    let status = format!(
+                        "node_presel {} dir {}\n",
+                        self.node_ids(monitor, desktop, value),
+                        direction.protocol_name(),
+                    );
+                    self.publish(SubscriberMask::NODE_PRESEL, &status);
+                }
+            }
+        }
         let node = self.tree_mut().add_node(window, split_ratio);
         let mut client = Client::from_settings(&self.state.settings);
         client.class_name.clone_from(&consequence.class_name);
@@ -164,42 +223,23 @@ impl DaemonApp {
         if let Some(anchor) = anchor {
             let split_ratio = self.state.settings.split_ratio;
             let branch = self.tree_mut().add_node(internal_xid, split_ratio);
-            let (polarity, split_type) = match consequence.split_dir {
-                Some(Direction::North) => (ChildPolarity::First, Some(SplitType::Horizontal)),
-                Some(Direction::West) => (ChildPolarity::First, Some(SplitType::Vertical)),
-                Some(Direction::South) => (ChildPolarity::Second, Some(SplitType::Horizontal)),
-                Some(Direction::East) => (ChildPolarity::Second, Some(SplitType::Vertical)),
-                None => (
-                    match self.state.settings.initial_polarity {
-                        crate::types::ChildPolarity::FirstChild => ChildPolarity::First,
-                        crate::types::ChildPolarity::SecondChild => ChildPolarity::Second,
-                    },
-                    None,
-                ),
+            let polarity = match self.state.settings.initial_polarity {
+                crate::types::ChildPolarity::FirstChild => ChildPolarity::First,
+                crate::types::ChildPolarity::SecondChild => ChildPolarity::Second,
             };
-            if let Some(split_type) = split_type {
-                self.node_mut(branch).split_type = split_type;
-            }
-            if consequence.split_ratio != 0.0 {
-                self.node_mut(branch).split_ratio = consequence.split_ratio;
-            }
+            let had_presel = self.node(anchor).presel.is_some();
             // Spiral insertion must know whether the new subtree is vacant
             // before deciding whether to rotate the existing parent.
             self.tree_mut().sync_vacancy(node);
-            let result = if consequence.split_dir.is_none() {
-                let scheme = self.state.settings.automatic_scheme;
-                self.tree_mut().insert_automatic(
-                    &mut tree_state,
-                    node,
-                    anchor,
-                    branch,
-                    polarity,
-                    scheme,
-                )
-            } else {
-                self.tree_mut()
-                    .insert(&mut tree_state, node, Some(anchor), Some(branch), polarity)
-            };
+            let scheme = self.state.settings.automatic_scheme;
+            let result = self.tree_mut().insert_automatic(
+                &mut tree_state,
+                node,
+                anchor,
+                branch,
+                polarity,
+                scheme,
+            );
             match result {
                 // The anchor was a bare receptacle, so `insert` replaced it in
                 // place and the branch allocated for the split went unused.
@@ -211,6 +251,13 @@ impl DaemonApp {
                     self.state.forget_retired_nodes();
                     return None;
                 }
+            }
+            if had_presel {
+                let status = format!(
+                    "node_presel {} cancel\n",
+                    self.node_ids(monitor, desktop, anchor),
+                );
+                self.publish(SubscriberMask::NODE_PRESEL, &status);
             }
             self.state.forget_retired_nodes();
         } else if self
@@ -232,6 +279,35 @@ impl DaemonApp {
             }
         }
         self.world_mut().desktop_mut(desktop).tree = tree_state;
+        let previous_layout = self.world().desktop(desktop).layout;
+        let single_monocle = self.state.settings.single_monocle;
+        let leave_single_monocle = single_monocle
+            && previous_layout == crate::types::Layout::Monocle
+            && self
+                .world()
+                .desktop(desktop)
+                .tree
+                .root
+                .is_some_and(|root| self.tree().tiled_count(root, true) > 1);
+        if leave_single_monocle {
+            let user_layout = self.world().desktop(desktop).user_layout;
+            if self
+                .world_mut()
+                .set_layout(desktop, user_layout, false, single_monocle)
+            {
+                let status = format!(
+                    "desktop_layout {} {}\n",
+                    self.desktop_ids(monitor, desktop),
+                    user_layout.protocol_name(),
+                );
+                self.publish(SubscriberMask::DESKTOP_LAYOUT, &status);
+                if self.world().focused_monitor == Some(monitor)
+                    && self.world().monitor(monitor).active_desktop == Some(desktop)
+                {
+                    self.broadcast_report();
+                }
+            }
+        }
         if consequence.sticky {
             let sticky_count = self.world().monitor(monitor).sticky_count.saturating_add(1);
             self.world_mut().monitor_mut(monitor).sticky_count = sticky_count;
@@ -536,13 +612,77 @@ impl DaemonApp {
         // so this is where upstream `free`s it.
         self.tree_mut().destroy_subtree(node);
         self.state.forget_retired_nodes();
+        let repair_focus = tree_state.focus.is_none();
+        if repair_focus {
+            tree_state.focus = self
+                .state
+                .history
+                .last_node(&self.state.world.tree, desktop, None)
+                .or_else(|| {
+                    tree_state
+                        .root
+                        .and_then(|root| self.tree().first_focusable_leaf(root))
+                });
+        }
         self.world_mut().desktop_mut(desktop).tree = tree_state;
         if was_sticky {
             let sticky_count = self.world().monitor(monitor).sticky_count.saturating_sub(1);
             self.world_mut().monitor_mut(monitor).sticky_count = sticky_count;
         }
         self.state.clients_count = self.state.clients_count.saturating_sub(1);
-        self.broadcast_report();
+        let previous_layout = self.world().desktop(desktop).layout;
+        let single_monocle = self.state.settings.single_monocle;
+        let enter_single_monocle = single_monocle
+            && previous_layout != crate::types::Layout::Monocle
+            && self
+                .world()
+                .desktop(desktop)
+                .tree
+                .root
+                .is_none_or(|root| self.tree().tiled_count(root, true) <= 1);
+        if enter_single_monocle
+            && self.world_mut().set_layout(
+                desktop,
+                crate::types::Layout::Monocle,
+                false,
+                single_monocle,
+            )
+        {
+            let status = format!(
+                "desktop_layout {} monocle\n",
+                self.desktop_ids(monitor, desktop),
+            );
+            self.publish(SubscriberMask::DESKTOP_LAYOUT, &status);
+        }
+        if repair_focus {
+            let successor = self.world().desktop(desktop).tree.focus;
+            let globally_focused = self.world().focused_monitor == Some(monitor)
+                && self.world().monitor(monitor).active_desktop == Some(desktop);
+            if successor.is_some() {
+                self.state.history.add(
+                    crate::history::Coordinates {
+                        monitor,
+                        desktop,
+                        node: successor,
+                    },
+                    globally_focused,
+                );
+            }
+            self.state.pending_effects.push(CommandEffect::Focus {
+                monitor,
+                previous_monitor: self.world().focused_monitor,
+                desktop,
+                previous_desktop: Some(desktop),
+                node: successor,
+                activate: !globally_focused,
+                auto_raise: self.state.auto_raise,
+            });
+            self.state
+                .pending_effects
+                .push(CommandEffect::RefreshBorders);
+        } else {
+            self.broadcast_report();
+        }
         Some((monitor, desktop))
     }
 }
@@ -556,7 +696,8 @@ mod tests {
         app_with_desktop, manage_window, manage_window_with, read_available, subscribe_socket,
     };
     use crate::state::CommandEffect;
-    use crate::types::{ClientState, HonorSizeHintsMode, StackLayer};
+    use crate::tree::Presel;
+    use crate::types::{ClientState, HonorSizeHintsMode, Layout, SplitType, StackLayer};
 
     #[test]
     fn unix_subscription_gets_manage_and_unmanage_records() {
@@ -776,6 +917,156 @@ mod tests {
         assert!((app.state.world.tree.node(second_parent).split_ratio - 0.3).abs() < f64::EPSILON);
         assert_eq!(app.state.world.desktop(desktop).tree.focus, Some(third));
         assert_eq!(app.state.world.focused_monitor, Some(monitor));
+    }
+
+    #[test]
+    fn private_focused_anchor_redirects_insertion_to_a_public_leaf() {
+        let (mut app, monitor, desktop) = app_with_desktop();
+        let (_, _, public) = manage_window(&mut app, 10);
+        let (_, _, private) = manage_window(&mut app, 11);
+        let _ = arrange::arrange(&mut app.state.world, monitor, desktop, &app.state.settings);
+        app.state.world.tree.node_mut(private).private = true;
+        let root = app.state.world.desktop(desktop).tree.root.unwrap();
+        assert_eq!(app.state.world.desktop(desktop).tree.focus, Some(private));
+        assert!(app.state.world.tree.is_protected_insertion_anchor(private));
+        assert_eq!(app.state.world.tree.find_public(root, 0), Some(public));
+
+        let (_, _, inserted) = manage_window(&mut app, 12);
+        assert_eq!(
+            app.state.world.tree.node(public).parent,
+            app.state.world.tree.node(inserted).parent
+        );
+        assert_ne!(
+            app.state.world.tree.node(private).parent,
+            app.state.world.tree.node(inserted).parent
+        );
+    }
+
+    #[test]
+    fn rule_split_fields_override_anchor_preselection_before_insertion() {
+        let (mut app, _, _) = app_with_desktop();
+        let (_, _, anchor) = manage_window(&mut app, 10);
+        app.state.world.tree.node_mut(anchor).presel = Some(Presel {
+            split_dir: Direction::West,
+            split_ratio: 0.8,
+            feedback: None,
+        });
+        let mut consequence = make_rule_consequence();
+        consequence.split_dir = Some(Direction::South);
+        consequence.split_ratio = 0.3;
+
+        let inserted = manage_window_with(
+            &mut app,
+            11,
+            &consequence,
+            Rectangle::default(),
+            SizeHints::default(),
+            1000,
+        )
+        .unwrap()
+        .2;
+        let parent = app.state.world.tree.node(inserted).parent.unwrap();
+        assert_eq!(
+            app.state.world.tree.node(parent).split_type,
+            SplitType::Horizontal
+        );
+        assert!((app.state.world.tree.node(parent).split_ratio - 0.3).abs() < f64::EPSILON);
+        assert_eq!(app.state.world.tree.node(parent).first_child, Some(anchor));
+        assert_eq!(
+            app.state.world.tree.node(parent).second_child,
+            Some(inserted)
+        );
+        assert!(app.state.world.tree.node(anchor).presel.is_none());
+    }
+
+    #[test]
+    fn rule_split_ratio_preserves_an_existing_preselection_direction() {
+        let (mut app, _, _) = app_with_desktop();
+        let (_, _, anchor) = manage_window(&mut app, 10);
+        app.state.world.tree.node_mut(anchor).presel = Some(Presel {
+            split_dir: Direction::West,
+            split_ratio: 0.8,
+            feedback: None,
+        });
+        let mut consequence = make_rule_consequence();
+        consequence.split_ratio = 0.25;
+
+        let inserted = manage_window_with(
+            &mut app,
+            11,
+            &consequence,
+            Rectangle::default(),
+            SizeHints::default(),
+            1000,
+        )
+        .unwrap()
+        .2;
+        let parent = app.state.world.tree.node(inserted).parent.unwrap();
+        assert_eq!(
+            app.state.world.tree.node(parent).split_type,
+            SplitType::Vertical
+        );
+        assert!((app.state.world.tree.node(parent).split_ratio - 0.25).abs() < f64::EPSILON);
+        assert_eq!(
+            app.state.world.tree.node(parent).first_child,
+            Some(inserted)
+        );
+        assert_eq!(app.state.world.tree.node(parent).second_child, Some(anchor));
+    }
+
+    #[test]
+    fn single_monocle_tracks_the_transition_between_one_and_two_clients() {
+        let (mut app, monitor, desktop) = app_with_desktop();
+        app.state.settings.single_monocle = true;
+        app.state.world.desktop_mut(desktop).layout = Layout::Monocle;
+        app.state.world.desktop_mut(desktop).user_layout = Layout::Tiled;
+
+        let (_, _, first) = manage_window(&mut app, 10);
+        assert_eq!(app.state.world.desktop(desktop).layout, Layout::Monocle);
+        let (_, _, second) = manage_window(&mut app, 11);
+        assert_eq!(app.state.world.desktop(desktop).layout, Layout::Tiled);
+
+        app.state.pending_effects.clear();
+        assert!(app.forget_window(11).is_some());
+        assert_eq!(app.state.world.desktop(desktop).layout, Layout::Monocle);
+        assert_eq!(app.state.world.desktop(desktop).tree.focus, Some(first));
+        assert!(app.state.pending_effects.iter().any(|effect| {
+            matches!(
+                effect,
+                CommandEffect::Focus {
+                    monitor: effect_monitor,
+                    desktop: effect_desktop,
+                    node: Some(effect_node),
+                    ..
+                } if *effect_monitor == monitor && *effect_desktop == desktop && *effect_node == first
+            )
+        }));
+        assert!(!app.state.world.tree.is_live(second));
+    }
+
+    #[test]
+    fn closing_the_focused_node_uses_history_then_the_first_focusable_leaf() {
+        let (mut app, monitor, desktop) = app_with_desktop();
+        let (_, _, first) = manage_window(&mut app, 10);
+        let (_, _, second) = manage_window(&mut app, 11);
+        let (_, _, third) = manage_window(&mut app, 12);
+        assert!(CommandHandler::new(&mut app.state).focus_location(
+            crate::query::Coordinates::node(monitor, desktop, first),
+            false,
+        ));
+
+        app.state.pending_effects.clear();
+        assert!(app.forget_window(10).is_some());
+        assert_eq!(app.state.world.desktop(desktop).tree.focus, Some(third));
+
+        app.state.history.clear();
+        app.state.world.desktop_mut(desktop).tree.focus = Some(second);
+        app.state.pending_effects.clear();
+        assert!(app.forget_window(11).is_some());
+        assert_eq!(app.state.world.desktop(desktop).tree.focus, Some(third));
+        assert!(app.state.pending_effects.iter().any(|effect| {
+            matches!(effect, CommandEffect::Focus { node: Some(node), .. } if *node == third)
+        }));
     }
 
     #[test]

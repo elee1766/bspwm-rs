@@ -51,15 +51,66 @@ impl CommandHandler<'_> {
         });
     }
 
-    pub(super) fn set_node_state(
+    pub(crate) fn set_node_state(
         &mut self,
+        monitor: crate::world::MonitorId,
         desktop: crate::world::DesktopId,
         node: crate::tree::NodeId,
         state: ClientState,
     ) -> bool {
+        let presels = self.presel_snapshot(desktop);
+        let changed =
+            self.state
+                .world
+                .set_state(desktop, node, state, self.state.settings.single_monocle);
+        if changed {
+            self.broadcast_cancelled_presels(monitor, desktop, presels);
+        }
+        changed
+    }
+
+    pub(super) fn presel_snapshot(
+        &self,
+        desktop: crate::world::DesktopId,
+    ) -> Vec<(crate::tree::NodeId, u32)> {
+        let Some(root) = self.state.world.desktop(desktop).tree.root else {
+            return Vec::new();
+        };
         self.state
             .world
-            .set_state(desktop, node, state, self.state.settings.single_monocle)
+            .tree
+            .preorder(root)
+            .filter_map(|node| {
+                let value = self.state.world.tree.node(node);
+                value.presel.as_ref().map(|_| (node, value.external_id))
+            })
+            .collect()
+    }
+
+    pub(super) fn broadcast_cancelled_presels(
+        &mut self,
+        monitor: crate::world::MonitorId,
+        desktop: crate::world::DesktopId,
+        before: Vec<(crate::tree::NodeId, u32)>,
+    ) {
+        for (node, external_id) in before {
+            if self
+                .state
+                .world
+                .tree
+                .get(node)
+                .is_some_and(|value| value.presel.is_none())
+            {
+                self.broadcast(
+                    crate::types::SubscriberMask::NODE_PRESEL,
+                    format!(
+                        "node_presel 0x{:08X} 0x{:08X} 0x{external_id:08X} cancel\n",
+                        self.state.world.monitor(monitor).external_id,
+                        self.state.world.desktop(desktop).external_id,
+                    ),
+                );
+            }
+        }
     }
 
     pub(super) fn layout_effect(
@@ -219,7 +270,7 @@ impl CommandHandler<'_> {
                     .as_ref()
                     .unwrap()
                     .state;
-                self.set_node_state(desktop, node, state);
+                self.set_node_state(monitor, desktop, node, state);
                 self.state.pending_effects.extend([
                     CommandEffect::SyncWindowState { node },
                     CommandEffect::Restack { node, auto_raise },

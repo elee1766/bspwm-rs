@@ -95,6 +95,7 @@ impl XEventContext<'_> {
         if let Some((monitor, desktop)) = location {
             self.app.arrange_desktop(self.x11, monitor, desktop)?;
         }
+        self.app.execute_pending_effects(self.x11)?;
         self.app.update_ewmh(self.x11)
     }
 
@@ -414,9 +415,9 @@ impl XEventContext<'_> {
                 };
                 let old = self.client(node).state;
                 let old_layout = self.world().desktop(desktop).layout;
-                let single_monocle = self.app.state.settings.single_monocle;
-                self.world_mut()
-                    .set_state(desktop, node, next, single_monocle);
+                self.app
+                    .command()
+                    .set_node_state(monitor, desktop, node, next);
                 self.app.state.pending_effects.extend([
                     CommandEffect::Restack {
                         node,
