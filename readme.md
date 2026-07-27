@@ -14,6 +14,8 @@ i might add some backwards compatible features (more commands) to it in the futu
 
 supposedly https://github.com/baskerville/bspwm/issues/651 issue should be fixed here (hidden window thing maybe?)
 
+i am using this wm currently! it is ready for use! i don't use every bspwm feature though so im sure there are problems.
+
 ## installation
 
 i might setup builds and releases later but i dont really want to rn
