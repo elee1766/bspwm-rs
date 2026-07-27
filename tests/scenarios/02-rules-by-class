@@ -2,10 +2,19 @@
 set -u
 . "$TEST_ROOT/prelude"
 
-$BSPC rule --add ScenarioRule:scenario --one-shot state=floating
+$BSPC rule --add '*' state=floating
+$BSPC rule --add ScenarioRule:scenario state=tiled
 xid=$(add_test_window scenario ScenarioRule)
 tree=$($BSPC query -T -n "$xid")
 assert_eq ScenarioRule "$(printf '%s' "$tree" | jq -r '.client.className')" "rule class"
 assert_eq scenario "$(printf '%s' "$tree" | jq -r '.client.instanceName')" "rule instance"
-assert_eq floating "$(printf '%s' "$tree" | jq -r '.client.state')" "class rule state"
+assert_eq tiled "$(printf '%s' "$tree" | jq -r '.client.state')" "later class rule overrides wildcard"
+poll_until 50 0.02 x_matches_model_rectangle "$xid" \
+	|| fail "later tiled rule state does not match the X window geometry"
+
+fallback=$(add_test_window fallback OtherRule)
+assert_eq floating "$($BSPC query -T -n "$fallback" | jq -r '.client.state')" "wildcard default state"
+
+close_test_window "$fallback"
 close_test_window "$xid"
+$BSPC rule --remove '*:*:*'

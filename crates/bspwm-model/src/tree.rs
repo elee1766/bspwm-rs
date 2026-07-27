@@ -4,8 +4,8 @@ use slotmap::SlotMap;
 
 use crate::settings::Settings;
 use crate::types::{
-    CirculateDirection, ClientState, Constraints, Direction, Flip, HonorSizeHintsMode, Rectangle,
-    SplitType, StackLayer, WmFlags,
+    AutomaticScheme, CirculateDirection, ClientState, Constraints, Direction, Flip,
+    HonorSizeHintsMode, Rectangle, SplitType, StackLayer, WmFlags,
 };
 
 pub const MIN_WIDTH: u16 = 32;
@@ -453,6 +453,112 @@ impl Tree {
     #[must_use]
     pub fn contains(&self, state: &TreeState, id: NodeId) -> bool {
         self.is_live(id) && state.root.is_some_and(|root| self.is_descendant(id, root))
+    }
+
+    /// Inserts a newly managed node using bspwm's configured automatic scheme.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn insert_automatic(
+        &mut self,
+        state: &mut TreeState,
+        subtree: NodeId,
+        anchor: NodeId,
+        branch: NodeId,
+        polarity: ChildPolarity,
+        scheme: AutomaticScheme,
+    ) -> Result<Option<NodeId>, StructuralError> {
+        if !self.contains(state, anchor)
+            || self.node(anchor).presel.is_some()
+            || self.is_leaf(anchor) && self.node(anchor).client.is_none()
+        {
+            return self.insert(state, subtree, Some(anchor), Some(branch), polarity);
+        }
+        let Some(root) = state.root else {
+            return Err(StructuralError::InvalidAnchor);
+        };
+        let parent = self.node(anchor).parent;
+        let single_tiled = self
+            .node(anchor)
+            .client
+            .as_ref()
+            .is_some_and(|client| client.state.is_tiled())
+            && self.tiled_count(root, true) == 1;
+
+        if let Some(parent) = parent.filter(|_| scheme == AutomaticScheme::Spiral && !single_tiled)
+        {
+            if self.node(subtree).parent.is_some() || self.contains(state, subtree) {
+                return Err(StructuralError::AlreadyAttached);
+            }
+            if self.node(branch).parent.is_some()
+                || !self.is_leaf(branch)
+                || self.contains(state, branch)
+                || branch == subtree
+                || branch == anchor
+            {
+                return Err(StructuralError::InvalidBranch);
+            }
+            let anchor_is_first = self.node(parent).first_child == Some(anchor);
+            if !anchor_is_first && self.node(parent).second_child != Some(anchor) {
+                return Err(StructuralError::InvalidAnchor);
+            }
+            let grandparent = self.node(parent).parent;
+            let split_type = self.node(parent).split_type;
+            let split_ratio = self.node(parent).split_ratio;
+            self.replace_parent_edge(state, grandparent, parent, branch);
+            {
+                let value = self.node_mut(branch);
+                value.parent = grandparent;
+                value.split_type = split_type;
+                value.split_ratio = split_ratio;
+            }
+            if anchor_is_first {
+                self.attach_children(branch, subtree, parent);
+                if !self.node(subtree).vacant {
+                    self.rotate_rec(parent, 90);
+                }
+            } else {
+                self.attach_children(branch, parent, subtree);
+                if !self.node(subtree).vacant {
+                    self.rotate_rec(parent, 270);
+                }
+            }
+            self.rebuild_constraints_from_leaves(branch);
+            self.rebuild_constraints_towards_root(branch);
+            self.focus_if_unfocused(state, subtree);
+            return Ok(None);
+        }
+
+        let longest_side = || {
+            let rectangle = self.node(anchor).rectangle;
+            if rectangle.width > rectangle.height {
+                SplitType::Vertical
+            } else {
+                SplitType::Horizontal
+            }
+        };
+        let split_type = match parent {
+            None => longest_side(),
+            Some(_) if scheme == AutomaticScheme::LongestSide || single_tiled => longest_side(),
+            Some(parent) => {
+                let mut candidate = Some(parent);
+                while let Some(node) = candidate {
+                    let value = self.node(node);
+                    let (Some(first), Some(second)) = (value.first_child, value.second_child)
+                    else {
+                        return Err(StructuralError::InvalidAnchor);
+                    };
+                    if !self.node(first).vacant && !self.node(second).vacant {
+                        break;
+                    }
+                    candidate = value.parent;
+                }
+                match self.node(candidate.unwrap_or(parent)).split_type {
+                    SplitType::Horizontal => SplitType::Vertical,
+                    SplitType::Vertical => SplitType::Horizontal,
+                }
+            }
+        };
+        self.node_mut(branch).split_type = split_type;
+        self.insert(state, subtree, Some(anchor), Some(branch), polarity)
     }
 
     #[allow(clippy::missing_errors_doc)]
@@ -1666,6 +1772,94 @@ mod tests {
         // Replacing the focused receptacle hands the focus to its replacement
         // instead of leaving a populated tree with nothing focused.
         assert_eq!(state.focus, Some(replacement));
+    }
+
+    #[test]
+    fn automatic_insertion_honors_longest_side_and_alternate_schemes() {
+        let settings = Settings::default();
+        for (scheme, expected) in [
+            (AutomaticScheme::LongestSide, SplitType::Horizontal),
+            (AutomaticScheme::Alternate, SplitType::Horizontal),
+        ] {
+            let mut tree = Tree::default();
+            let first = tree.add_node(1, 0.5);
+            let second = tree.add_node(2, 0.5);
+            let root = tree.add_node(3, 0.5);
+            for leaf in [first, second] {
+                tree.node_mut(leaf).client = Some(Client::from_settings(&settings));
+            }
+            tree.node_mut(first).rectangle = Rectangle::new(0, 0, 800, 600);
+            let mut state = TreeState::default();
+            tree.insert(&mut state, first, None, None, ChildPolarity::Second)
+                .unwrap();
+            tree.insert_automatic(
+                &mut state,
+                second,
+                first,
+                root,
+                ChildPolarity::Second,
+                AutomaticScheme::LongestSide,
+            )
+            .unwrap();
+            assert_eq!(tree.node(root).split_type, SplitType::Vertical);
+
+            tree.node_mut(second).rectangle = Rectangle::new(400, 0, 400, 600);
+            let third = tree.add_node(4, 0.5);
+            let branch = tree.add_node(5, 0.5);
+            tree.node_mut(third).client = Some(Client::from_settings(&settings));
+            tree.insert_automatic(
+                &mut state,
+                third,
+                second,
+                branch,
+                ChildPolarity::Second,
+                scheme,
+            )
+            .unwrap();
+            assert_eq!(tree.node(branch).split_type, expected);
+            assert_eq!(tree.validate(state.root.unwrap()), Ok(()));
+        }
+    }
+
+    #[test]
+    fn spiral_insertion_promotes_and_rotates_the_anchors_parent() {
+        let settings = Settings::default();
+        let mut tree = Tree::default();
+        let parent = tree.add_node(10, 0.4);
+        let first = tree.add_node(1, 0.5);
+        let anchor = tree.add_node(2, 0.5);
+        let incoming = tree.add_node(3, 0.5);
+        let branch = tree.add_node(11, 0.5);
+        for leaf in [first, anchor, incoming] {
+            tree.node_mut(leaf).client = Some(Client::from_settings(&settings));
+        }
+        tree.set_children(parent, first, anchor);
+        tree.node_mut(parent).split_type = SplitType::Vertical;
+        tree.node_mut(parent).split_ratio = 0.4;
+        let mut state = TreeState {
+            root: Some(parent),
+            focus: Some(anchor),
+        };
+
+        tree.insert_automatic(
+            &mut state,
+            incoming,
+            anchor,
+            branch,
+            ChildPolarity::Second,
+            AutomaticScheme::Spiral,
+        )
+        .unwrap();
+
+        assert_eq!(state.root, Some(branch));
+        assert_eq!(tree.node(branch).first_child, Some(parent));
+        assert_eq!(tree.node(branch).second_child, Some(incoming));
+        assert_eq!(tree.node(branch).split_type, SplitType::Vertical);
+        assert!((tree.node(branch).split_ratio - 0.4).abs() < f64::EPSILON);
+        assert_eq!(tree.node(parent).split_type, SplitType::Horizontal);
+        assert_eq!(tree.node(parent).first_child, Some(anchor));
+        assert_eq!(tree.node(parent).second_child, Some(first));
+        assert_eq!(tree.validate(branch), Ok(()));
     }
 
     /// `unlink` collapses the parent branch and `insert` consumes a bare

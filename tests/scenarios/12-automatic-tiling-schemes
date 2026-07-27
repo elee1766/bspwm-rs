@@ -1,0 +1,51 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+old_scheme=$($BSPC config automatic_scheme)
+old_border=$($BSPC config border_width)
+old_gap=$($BSPC config window_gap)
+$BSPC config border_width 0
+$BSPC config window_gap 0
+
+$BSPC config automatic_scheme longest_side
+first=$(add_test_window first SchemeTest)
+second=$(add_test_window second SchemeTest)
+third=$(add_test_window third SchemeTest)
+fourth=$(add_test_window fourth SchemeTest)
+assert_eq vertical "$($BSPC query -T -n @/ | jq -r '.splitType')" "longest-side root split"
+assert_eq horizontal "$($BSPC query -T -n @/2 | jq -r '.splitType')" "longest-side second split"
+assert_eq vertical "$($BSPC query -T -n @/2/2 | jq -r '.splitType')" "longest-side third split"
+for window in "$first" "$second" "$third" "$fourth"; do
+	poll_until 50 0.02 x_matches_model_rectangle "$window" \
+		|| fail "longest-side X geometry differs from model for $window"
+done
+[ "$(x_window_y "$third")" -gt "$(x_window_y "$second")" ] \
+	|| fail "longest-side scheme did not create a lower partition"
+[ "$(x_window_x "$fourth")" -gt "$(x_window_x "$third")" ] \
+	|| fail "longest-side scheme did not alternate back to a vertical partition"
+for window in "$fourth" "$third" "$second" "$first"; do
+	close_test_window "$window"
+done
+
+$BSPC config automatic_scheme spiral
+first=$(add_test_window spiral-first SchemeTest)
+second=$(add_test_window spiral-second SchemeTest)
+third=$(add_test_window spiral-third SchemeTest)
+assert_eq vertical "$($BSPC query -T -n @/ | jq -r '.splitType')" "spiral promoted root split"
+assert_eq horizontal "$($BSPC query -T -n @/1 | jq -r '.splitType')" "spiral rotated prior branch"
+for window in "$first" "$second" "$third"; do
+	poll_until 50 0.02 x_matches_model_rectangle "$window" \
+		|| fail "spiral X geometry differs from model for $window"
+done
+[ "$(x_window_x "$third")" -gt "$(x_window_x "$first")" ] \
+	|| fail "spiral did not promote the new window into a side partition"
+[ "$(x_window_y "$first")" -gt "$(x_window_y "$second")" ] \
+	|| fail "spiral did not rotate the previous branch"
+for window in "$third" "$second" "$first"; do
+	close_test_window "$window"
+done
+
+$BSPC config automatic_scheme "$old_scheme"
+$BSPC config border_width "$old_border"
+$BSPC config window_gap "$old_gap"

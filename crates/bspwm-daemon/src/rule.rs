@@ -374,6 +374,20 @@ mod tests {
     }
 
     #[test]
+    fn later_rules_override_matching_wildcard_defaults() {
+        let mut rules = RuleList::default();
+        rules.add_rule(rule("*", "state=floating focus=off", false));
+        rules.add_rule(rule("App:main", "state=tiled focus=on", false));
+        let mut consequence = make_rule_consequence();
+        consequence.set_window_properties(&WindowProperties::new("App", "main", "title"));
+
+        rules.apply_rules(&mut consequence);
+
+        assert_eq!(consequence.state, Some(ClientState::Tiled));
+        assert!(consequence.focus);
+    }
+
+    #[test]
     fn consequence_format_matches_external_rule_protocol() {
         let mut consequence = make_rule_consequence();
         parse_keys_values(

@@ -183,13 +183,24 @@ impl DaemonApp {
             if consequence.split_ratio != 0.0 {
                 self.node_mut(branch).split_ratio = consequence.split_ratio;
             }
-            match self.tree_mut().insert(
-                &mut tree_state,
-                node,
-                Some(anchor),
-                Some(branch),
-                polarity,
-            ) {
+            // Spiral insertion must know whether the new subtree is vacant
+            // before deciding whether to rotate the existing parent.
+            self.tree_mut().sync_vacancy(node);
+            let result = if consequence.split_dir.is_none() {
+                let scheme = self.state.settings.automatic_scheme;
+                self.tree_mut().insert_automatic(
+                    &mut tree_state,
+                    node,
+                    anchor,
+                    branch,
+                    polarity,
+                    scheme,
+                )
+            } else {
+                self.tree_mut()
+                    .insert(&mut tree_state, node, Some(anchor), Some(branch), polarity)
+            };
+            match result {
                 // The anchor was a bare receptacle, so `insert` replaced it in
                 // place and the branch allocated for the split went unused.
                 Ok(Some(_)) => self.tree_mut().destroy_subtree(branch),

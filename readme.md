@@ -4,6 +4,8 @@ a behavior-compatible rust ai rewrite of [bspwm](https://github.com/baskerville/
 
 it should act mostly the same. there are some implementation differences tho
 
+please tell me / open issue if you find incompatiblities with bspwm ill try to fix it
+
 i might add some backwards compatible features (more commands) to it in the future. not sure
 
 ## installation
