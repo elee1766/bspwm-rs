@@ -1,0 +1,36 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+# --- Transient child stacks above parent ---
+parent=$(add_controlled_window t-parent t-parent ScenarioTransient)
+child=$(add_controlled_window t-child t-child ScenarioTransient --transient-for "$parent")
+
+$BSPC node "$child" --state floating
+$BSPC node "$parent" --state floating
+$BSPC node "$parent" --focus
+
+# After focusing parent, child should be above parent in X stack.
+poll_until 50 0.05 x_window_above "$child" "$parent" \
+	|| fail "transient child is not above parent after focusing parent"
+
+# --- Changing WM_TRANSIENT_FOR clears the relationship ---
+send_window_command t-child transient-for none
+sleep 0.2
+
+# --- Re-establishing the relationship ---
+send_window_command t-child transient-for "$parent"
+sleep 0.2
+
+# After re-establishing, focusing parent should raise child above parent.
+# Put another window in between to verify the raise actually moves things.
+other=$(add_test_window t-other ScenarioTransient)
+$BSPC node "$other" --state floating
+$BSPC node "$other" --focus
+$BSPC node "$parent" --focus
+poll_until 50 0.05 x_window_above "$child" "$parent" \
+	|| fail "transient child not above parent after re-establishing and focusing parent"
+
+close_test_window "$other"
+close_test_window "$child"
+close_test_window "$parent"

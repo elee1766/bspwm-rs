@@ -1,0 +1,57 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+# --- Vacancy propagation after unlink ---
+# When a tiled node is removed and its floating sibling is promoted,
+# the grandparent must inherit the sibling's vacant status.
+
+old_border=$($BSPC config border_width)
+old_gap=$($BSPC config window_gap)
+old_scheme=$($BSPC config automatic_scheme)
+$BSPC config border_width 0
+$BSPC config window_gap 0
+
+tiled=$(add_test_window vacancy-tiled ScenarioVacancy)
+floating=$(add_test_window vacancy-floating ScenarioVacancy)
+$BSPC node "$floating" --state floating
+
+# The floating sibling is vacant from a tiling perspective, so the tiled
+# window should occupy the full monitor.
+poll_until 50 0.05 x_matches_model_rectangle "$tiled" \
+	|| fail "tiled window geometry does not match model (floating sibling should be vacant)"
+
+# Close the tiled window: the floating sibling is promoted.
+close_test_window "$tiled"
+
+# With only a floating window, the desktop root should be vacant.
+desktop_tree=$($BSPC query -T -d focused)
+root_vacant=$(printf '%s' "$desktop_tree" | jq -r '.root.vacant')
+assert_eq true "$root_vacant" "desktop root should be vacant with only a floating client"
+
+close_test_window "$floating"
+
+# --- Removal adjustment under longest-side scheme ---
+$BSPC config automatic_scheme longest_side
+
+a=$(add_test_window adj-a ScenarioAdj)
+b=$(add_test_window adj-b ScenarioAdj)
+c=$(add_test_window adj-c ScenarioAdj)
+
+# Close b: the sibling of b should have its split_type adjusted.
+close_test_window "$b"
+
+# Verify arrangement is still valid (no crash, both remaining windows visible).
+node_exists "$a" || fail "window a should still exist after closing b"
+node_exists "$c" || fail "window c should still exist after closing b"
+node_missing "$b" || fail "window b should be gone after closing"
+poll_until 50 0.05 x_matches_model_rectangle "$a" \
+	|| fail "window a geometry does not match model after removal adjustment"
+poll_until 50 0.05 x_matches_model_rectangle "$c" \
+	|| fail "window c geometry does not match model after removal adjustment"
+
+close_test_window "$c"
+close_test_window "$a"
+$BSPC config automatic_scheme "$old_scheme"
+$BSPC config border_width "$old_border"
+$BSPC config window_gap "$old_gap"

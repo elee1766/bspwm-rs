@@ -22,6 +22,7 @@ struct Options {
     input: Option<bool>,
     override_redirect: bool,
     user_time: Option<u32>,
+    transient_for: Option<u32>,
 }
 
 struct Atoms {
@@ -32,6 +33,7 @@ struct Atoms {
     wm_size_hints: x::Atom,
     net_wm_strut_partial: x::Atom,
     net_wm_user_time: x::Atom,
+    wm_transient_for: x::Atom,
 }
 
 enum CommandResult {
@@ -93,6 +95,13 @@ fn parse_arguments() -> Result<(String, String, u32, Options), Box<dyn Error>> {
                 });
             }
             "--override-redirect" => options.override_redirect = true,
+            "--transient-for" => {
+                let value = arguments.next().ok_or("--transient-for requires XID")?;
+                options.transient_for = Some(u32::from_str_radix(
+                    value.strip_prefix("0x").unwrap_or(&value),
+                    16,
+                )?);
+            }
             "--user-time" => {
                 options.user_time = Some(
                     arguments
@@ -218,6 +227,7 @@ fn set_strut(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn process_command(
     connection: &xcb::Connection,
     window: x::Window,
@@ -299,6 +309,28 @@ fn process_command(
         }
         "strut" => {
             set_strut(connection, window, atoms, &parts)?;
+        }
+        "transient-for" => {
+            if parts.len() != 2 {
+                return Err("transient-for requires XID or none".into());
+            }
+            if parts[1] == "none" {
+                connection.send_request(&x::DeleteProperty {
+                    window,
+                    property: atoms.wm_transient_for,
+                });
+            } else {
+                let parent: u32 =
+                    u32::from_str_radix(parts[1].strip_prefix("0x").unwrap_or(parts[1]), 16)
+                        .map_err(|_| format!("invalid XID '{}'", parts[1]))?;
+                connection.send_request(&x::ChangeProperty {
+                    mode: x::PropMode::Replace,
+                    window,
+                    property: atoms.wm_transient_for,
+                    r#type: x::ATOM_WINDOW,
+                    data: &[parent],
+                });
+            }
         }
         "delete-property" => {
             if parts.len() != 2 {
@@ -490,6 +522,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         wm_size_hints: intern_atom(&connection, b"WM_SIZE_HINTS")?,
         net_wm_strut_partial: intern_atom(&connection, b"_NET_WM_STRUT_PARTIAL")?,
         net_wm_user_time: intern_atom(&connection, b"_NET_WM_USER_TIME")?,
+        wm_transient_for: intern_atom(&connection, b"WM_TRANSIENT_FOR")?,
     };
     let wm_class_atom = intern_atom(&connection, b"WM_CLASS")?;
 
@@ -554,6 +587,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         r#type: x::ATOM_STRING,
         data: format!("{class_name}:{instance_name}  #{color:06X}").as_bytes(),
     });
+    if let Some(parent) = options.transient_for {
+        connection.send_request(&x::ChangeProperty {
+            mode: x::PropMode::Replace,
+            window,
+            property: atoms.wm_transient_for,
+            r#type: x::ATOM_WINDOW,
+            data: &[parent],
+        });
+    }
     connection.send_request(&x::MapWindow { window });
     connection.flush()?;
 

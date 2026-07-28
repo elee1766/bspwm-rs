@@ -1,0 +1,58 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+window_property_contains() {
+	xprop -id "$1" "$2" 2>/dev/null | grep -F "$3" >/dev/null
+}
+
+window_property_lacks() {
+	! window_property_contains "$1" "$2" "$3"
+}
+
+client_is_urgent() {
+	[ "$($BSPC query -T -n "$1" | jq -r '.client.urgent')" = true ]
+}
+client_is_not_urgent() {
+	[ "$($BSPC query -T -n "$1" | jq -r '.client.urgent')" = false ]
+}
+
+$BSPC monitor focused --reset-desktops state-a state-b
+$BSPC desktop state-a --focus
+
+# --- Urgency clears when WM_HINTS bit is withdrawn ---
+win=$(add_controlled_window urgency-lifecycle urg ScenarioState)
+$BSPC desktop state-b --focus
+send_window_command urgency-lifecycle urgency on
+poll_until 100 0.02 client_is_urgent "$win" || fail "urgency was not set"
+send_window_command urgency-lifecycle urgency off
+poll_until 100 0.02 client_is_not_urgent "$win" \
+	|| fail "urgency was not cleared when WM_HINTS bit was withdrawn"
+poll_until 100 0.02 window_property_lacks "$win" _NET_WM_STATE _NET_WM_STATE_DEMANDS_ATTENTION \
+	|| fail "_NET_WM_STATE_DEMANDS_ATTENTION remained after urgency cleared"
+$BSPC desktop state-a --focus
+
+# --- Layer change updates _NET_WM_STATE ---
+$BSPC node "$win" --layer above
+poll_until 50 0.02 window_property_contains "$win" _NET_WM_STATE _NET_WM_STATE_ABOVE \
+	|| fail "layer=above did not set _NET_WM_STATE_ABOVE"
+$BSPC node "$win" --layer normal
+poll_until 50 0.02 window_property_lacks "$win" _NET_WM_STATE _NET_WM_STATE_ABOVE \
+	|| fail "layer=normal did not clear _NET_WM_STATE_ABOVE"
+$BSPC node "$win" --layer below
+poll_until 50 0.02 window_property_contains "$win" _NET_WM_STATE _NET_WM_STATE_BELOW \
+	|| fail "layer=below did not set _NET_WM_STATE_BELOW"
+$BSPC node "$win" --layer normal
+poll_until 50 0.02 window_property_lacks "$win" _NET_WM_STATE _NET_WM_STATE_BELOW \
+	|| fail "layer=normal did not clear _NET_WM_STATE_BELOW"
+
+# --- Sticky via bspc updates _NET_WM_STATE ---
+$BSPC node "$win" --flag sticky=on
+poll_until 50 0.02 window_property_contains "$win" _NET_WM_STATE _NET_WM_STATE_STICKY \
+	|| fail "sticky=on did not set _NET_WM_STATE_STICKY"
+$BSPC node "$win" --flag sticky=off
+poll_until 50 0.02 window_property_lacks "$win" _NET_WM_STATE _NET_WM_STATE_STICKY \
+	|| fail "sticky=off did not clear _NET_WM_STATE_STICKY"
+
+close_test_window "$win"
+$BSPC monitor focused --reset-desktops Desktop

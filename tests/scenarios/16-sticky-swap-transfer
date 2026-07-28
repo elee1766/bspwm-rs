@@ -1,0 +1,35 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+$BSPC monitor focused --reset-desktops sticky-a sticky-b
+$BSPC desktop sticky-a --focus
+
+a=$(add_test_window sticky-win ScenarioSticky)
+b=$(add_test_window other-win ScenarioSticky)
+
+# Put b on the second desktop.
+$BSPC node "$b" --to-desktop sticky-b
+
+# Make a sticky.
+$BSPC node "$a" --flag sticky=on
+
+# Swap should fail because a is sticky and they are on different desktops.
+if $BSPC node "$a" --swap "$b" 2>/dev/null; then
+	fail "cross-desktop swap of sticky node should have been rejected"
+fi
+
+# Transfer to active desktop when setting sticky:
+# First unsticky a, move it to sticky-b.
+$BSPC node "$a" --flag sticky=off
+$BSPC node "$a" --to-desktop sticky-b
+$BSPC desktop sticky-a --focus
+# Now set sticky on a (which is on sticky-b while we're focused on sticky-a).
+# It should transfer to sticky-a.
+$BSPC node "$a" --flag sticky=on
+assert_eq "$a" "$($BSPC query -N -d sticky-a -n "$a" 2>/dev/null)" \
+	"setting sticky transferred node to active desktop"
+
+close_test_window "$b"
+close_test_window "$a"
+$BSPC monitor focused --reset-desktops Desktop
