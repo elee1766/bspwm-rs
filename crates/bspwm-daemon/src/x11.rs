@@ -1,7 +1,9 @@
 use std::cell::Cell;
 use std::os::fd::{AsRawFd, RawFd};
 
-use xcb::{CookieWithReplyChecked, Extension, ExtensionData, Request, RequestWithoutReply, x};
+use xcb::{
+    CookieWithReplyChecked, Extension, ExtensionData, Request, RequestWithoutReply, sync, x,
+};
 
 xcb::atoms_struct! {
     #[derive(Copy, Clone, Debug)]
@@ -10,6 +12,9 @@ xcb::atoms_struct! {
         pub wm_protocols => b"WM_PROTOCOLS" only_if_exists = false,
         pub wm_take_focus => b"WM_TAKE_FOCUS" only_if_exists = false,
         pub wm_delete_window => b"WM_DELETE_WINDOW" only_if_exists = false,
+        pub net_wm_ping => b"_NET_WM_PING" only_if_exists = false,
+        pub net_wm_sync_request => b"_NET_WM_SYNC_REQUEST" only_if_exists = false,
+        pub net_wm_sync_request_counter => b"_NET_WM_SYNC_REQUEST_COUNTER" only_if_exists = false,
         pub wm_class => b"WM_CLASS" only_if_exists = false,
         pub wm_name => b"WM_NAME" only_if_exists = false,
         pub wm_transient_for => b"WM_TRANSIENT_FOR" only_if_exists = false,
@@ -19,15 +24,27 @@ xcb::atoms_struct! {
         pub net_supported => b"_NET_SUPPORTED" only_if_exists = false,
         pub net_supporting_wm_check => b"_NET_SUPPORTING_WM_CHECK" only_if_exists = false,
         pub net_desktop_names => b"_NET_DESKTOP_NAMES" only_if_exists = false,
+        pub net_desktop_geometry => b"_NET_DESKTOP_GEOMETRY" only_if_exists = false,
         pub net_desktop_viewport => b"_NET_DESKTOP_VIEWPORT" only_if_exists = false,
+        pub net_workarea => b"_NET_WORKAREA" only_if_exists = false,
         pub net_number_of_desktops => b"_NET_NUMBER_OF_DESKTOPS" only_if_exists = false,
         pub net_current_desktop => b"_NET_CURRENT_DESKTOP" only_if_exists = false,
         pub net_client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
         pub net_client_list_stacking => b"_NET_CLIENT_LIST_STACKING" only_if_exists = false,
         pub net_active_window => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
         pub net_close_window => b"_NET_CLOSE_WINDOW" only_if_exists = false,
+        pub net_moveresize_window => b"_NET_MOVERESIZE_WINDOW" only_if_exists = false,
+        pub net_wm_moveresize => b"_NET_WM_MOVERESIZE" only_if_exists = false,
+        pub net_request_frame_extents => b"_NET_REQUEST_FRAME_EXTENTS" only_if_exists = false,
+        pub net_frame_extents => b"_NET_FRAME_EXTENTS" only_if_exists = false,
         pub net_wm_strut_partial => b"_NET_WM_STRUT_PARTIAL" only_if_exists = false,
+        pub net_wm_strut => b"_NET_WM_STRUT" only_if_exists = false,
         pub net_wm_desktop => b"_NET_WM_DESKTOP" only_if_exists = false,
+        pub net_wm_user_time => b"_NET_WM_USER_TIME" only_if_exists = false,
+        pub net_wm_user_time_window => b"_NET_WM_USER_TIME_WINDOW" only_if_exists = false,
+        pub net_startup_id => b"_NET_STARTUP_ID" only_if_exists = false,
+        pub net_startup_info_begin => b"_NET_STARTUP_INFO_BEGIN" only_if_exists = false,
+        pub net_startup_info => b"_NET_STARTUP_INFO" only_if_exists = false,
         pub net_wm_state => b"_NET_WM_STATE" only_if_exists = false,
         pub net_wm_state_hidden => b"_NET_WM_STATE_HIDDEN" only_if_exists = false,
         pub net_wm_state_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
@@ -39,6 +56,16 @@ xcb::atoms_struct! {
         pub net_wm_state_maximized_vert => b"_NET_WM_STATE_MAXIMIZED_VERT" only_if_exists = false,
         pub net_wm_state_maximized_horz => b"_NET_WM_STATE_MAXIMIZED_HORZ" only_if_exists = false,
         pub net_wm_state_shaded => b"_NET_WM_STATE_SHADED" only_if_exists = false,
+        pub net_wm_allowed_actions => b"_NET_WM_ALLOWED_ACTIONS" only_if_exists = false,
+        pub net_wm_action_move => b"_NET_WM_ACTION_MOVE" only_if_exists = false,
+        pub net_wm_action_resize => b"_NET_WM_ACTION_RESIZE" only_if_exists = false,
+        pub net_wm_action_minimize => b"_NET_WM_ACTION_MINIMIZE" only_if_exists = false,
+        pub net_wm_action_stick => b"_NET_WM_ACTION_STICK" only_if_exists = false,
+        pub net_wm_action_fullscreen => b"_NET_WM_ACTION_FULLSCREEN" only_if_exists = false,
+        pub net_wm_action_change_desktop => b"_NET_WM_ACTION_CHANGE_DESKTOP" only_if_exists = false,
+        pub net_wm_action_close => b"_NET_WM_ACTION_CLOSE" only_if_exists = false,
+        pub net_wm_action_above => b"_NET_WM_ACTION_ABOVE" only_if_exists = false,
+        pub net_wm_action_below => b"_NET_WM_ACTION_BELOW" only_if_exists = false,
         pub net_wm_state_skip_taskbar => b"_NET_WM_STATE_SKIP_TASKBAR" only_if_exists = false,
         pub net_wm_state_skip_pager => b"_NET_WM_STATE_SKIP_PAGER" only_if_exists = false,
         pub net_wm_name => b"_NET_WM_NAME" only_if_exists = false,
@@ -95,6 +122,7 @@ pub struct Extensions {
     pub randr: Option<ExtensionInfo>,
     pub xinerama: Option<ExtensionInfo>,
     pub shape: Option<ExtensionInfo>,
+    pub sync: Option<ExtensionInfo>,
 }
 
 impl Extensions {
@@ -102,6 +130,7 @@ impl Extensions {
         Self {
             randr: xcb::randr::get_extension_data(connection).map(Into::into),
             xinerama: xcb::xinerama::get_extension_data(connection).map(Into::into),
+            sync: sync::get_extension_data(connection).map(Into::into),
             shape: xcb::shape::get_extension_data(connection).map(Into::into),
         }
     }

@@ -63,7 +63,7 @@ pub(super) fn manage_window(app: &mut DaemonApp, window: u32) -> (MonitorId, Des
         &RuleConsequence::default(),
         Rectangle::new(0, 0, 1, 1),
         SizeHints::default(),
-        ClientInitial::default(),
+        &ClientInitial::default(),
         !window,
     )
     .unwrap()
@@ -82,7 +82,7 @@ pub(super) fn manage_window_with(
         consequence,
         initial_rectangle,
         size_hints,
-        ClientInitial::default(),
+        &ClientInitial::default(),
         internal_xid,
     )
 }

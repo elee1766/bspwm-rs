@@ -70,6 +70,28 @@ fn main() -> Result<(), Box<dyn Error>> {
                 [x::CURRENT_TIME, 1, 0, 0, 0],
             )
         }
+        "moveresize" => {
+            let window = parse_window(&required(&mut arguments, "window")?)?;
+            let x = parse_i32(&required(&mut arguments, "x")?)?;
+            let y = parse_i32(&required(&mut arguments, "y")?)?;
+            let width = parse_u32(&required(&mut arguments, "width")?)?;
+            let height = parse_u32(&required(&mut arguments, "height")?)?;
+            (
+                window,
+                x11.atoms().net_moveresize_window,
+                [
+                    1 | (0xF << 8) | (1 << 12),
+                    x.cast_unsigned(),
+                    y.cast_unsigned(),
+                    width,
+                    height,
+                ],
+            )
+        }
+        "request-frame-extents" => {
+            let window = parse_window(&required(&mut arguments, "window")?)?;
+            (window, x11.atoms().net_request_frame_extents, [0; 5])
+        }
         _ => return Err("unknown EWMH command".into()),
     };
     if arguments.next().is_some() {
@@ -95,4 +117,8 @@ fn parse_u32(value: &str) -> Result<u32, Box<dyn Error>> {
     } else {
         value.parse()?
     })
+}
+
+fn parse_i32(value: &str) -> Result<i32, Box<dyn Error>> {
+    Ok(value.parse()?)
 }

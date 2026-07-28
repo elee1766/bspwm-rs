@@ -23,8 +23,9 @@ use std::io;
 use std::os::fd::RawFd;
 use std::path::Path;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
-use xcb::{Xid, XidNew, x};
+use xcb::{Xid, XidNew, sync, x};
 
 use crate::commands::CommandHandler;
 use crate::events::{MappingFilterState, PointerFilterState};
@@ -50,6 +51,10 @@ type WindowLocation = (MonitorId, DesktopId, NodeId);
 /// Every managed window, keyed by its X window identifier.
 type WindowIndex = HashMap<u32, WindowLocation>;
 
+fn timestamp_is_later(candidate: x::Timestamp, reference: x::Timestamp) -> bool {
+    candidate.wrapping_sub(reference).cast_signed() > 0
+}
+
 /// The application owned by [`crate::runtime::Runtime`].
 #[derive(Debug)]
 pub struct DaemonApp {
@@ -64,6 +69,11 @@ pub struct DaemonApp {
     pending_rules: Vec<PendingRule>,
     reaping_rules: Vec<crate::rule::ExternalRuleProcess>,
     restored_subscribers: Vec<restore::RestoredSubscriber>,
+    startup: crate::startup::StartupTracker,
+    last_user_time: Option<x::Timestamp>,
+    user_time_windows: HashMap<u32, u32>,
+    sync_request_clients: HashMap<u32, sync::Counter>,
+    pending_ewmh_pings: HashMap<u32, PendingEwmhPing>,
     #[doc(hidden)]
     pub mapped_feedbacks: HashSet<u32>,
     /// Lazily rebuilt `window -> location` index behind [`DaemonApp::managed_window`].
@@ -82,6 +92,39 @@ struct PointerGrab {
     handle: ResizeHandle,
     last_position: Point,
     last_motion_time: x::Timestamp,
+    origin: PointerGrabOrigin,
+    sync_resize: Option<SyncResize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SyncResize {
+    counter: sync::Counter,
+    value: i64,
+    in_flight: bool,
+    pending: Option<(Rectangle, x::Timestamp)>,
+    next_poll: Instant,
+    deadline: Instant,
+}
+
+const SYNC_RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const SYNC_RESIZE_TIMEOUT: Duration = Duration::from_millis(250);
+const EWMH_PING_TIMEOUT: Duration = Duration::from_secs(5);
+
+const fn sync_i64(value: sync::Int64) -> i64 {
+    ((value.hi as i64) << 32) | value.lo as i64
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PointerGrabOrigin {
+    Binding,
+    Ewmh { button: u8 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingEwmhPing {
+    timestamp: x::Timestamp,
+    deadline: Instant,
+    expiration_observed: bool,
 }
 
 #[doc(hidden)]
@@ -104,6 +147,123 @@ impl Drop for DaemonApp {
 }
 
 impl DaemonApp {
+    fn close_client(
+        &mut self,
+        x11: &X11,
+        node: NodeId,
+        timestamp: x::Timestamp,
+    ) -> Result<window::CloseMethod, RuntimeError> {
+        let window_id = self.xid(node);
+        let protocols = self.client(node).icccm;
+        let method = window::close_cached(x11, x::Window::new(window_id), protocols.delete_window)?;
+        if method == window::CloseMethod::WmDeleteWindow
+            && self.state.settings.enable_ewmh_ping
+            && protocols.ping
+        {
+            window::send_ping(x11, x::Window::new(window_id), timestamp)?;
+            self.pending_ewmh_pings.insert(
+                window_id,
+                PendingEwmhPing {
+                    timestamp,
+                    deadline: Instant::now() + EWMH_PING_TIMEOUT,
+                    expiration_observed: false,
+                },
+            );
+        }
+        Ok(method)
+    }
+
+    fn poll_ewmh_ping_timeouts(&mut self) -> bool {
+        if !self.state.settings.enable_ewmh_ping {
+            let changed = !self.pending_ewmh_pings.is_empty();
+            self.pending_ewmh_pings.clear();
+            return changed;
+        }
+        let now = Instant::now();
+        let mut expired = Vec::new();
+        let mut changed = false;
+        for (&window, ping) in &mut self.pending_ewmh_pings {
+            if now < ping.deadline {
+                continue;
+            }
+            if ping.expiration_observed {
+                expired.push(window);
+            } else {
+                ping.expiration_observed = true;
+                changed = true;
+            }
+        }
+        for window in expired {
+            self.pending_ewmh_pings.remove(&window);
+            eprintln!("bspwm: _NET_WM_PING timeout for window 0x{window:08X}");
+            changed = true;
+        }
+        changed
+    }
+
+    fn acknowledge_ewmh_ping(&mut self, window: u32, timestamp: x::Timestamp) -> bool {
+        if self
+            .pending_ewmh_pings
+            .get(&window)
+            .is_some_and(|ping| ping.timestamp == timestamp)
+        {
+            self.pending_ewmh_pings.remove(&window);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn poll_sync_resize_timeout(&mut self, x11: &X11) -> Result<bool, RuntimeError> {
+        let Some(mut grab) = self.pointer_grab else {
+            return Ok(false);
+        };
+        let Some(mut resize) = grab.sync_resize else {
+            return Ok(false);
+        };
+        if !resize.in_flight {
+            return Ok(false);
+        }
+        let now = Instant::now();
+        if now < resize.next_poll {
+            return Ok(false);
+        }
+        resize.next_poll = now + SYNC_RESIZE_POLL_INTERVAL;
+        let acknowledged = x11
+            .request(&sync::QueryCounter {
+                counter: resize.counter,
+            })
+            .is_ok_and(|reply| sync_i64(reply.counter_value()) >= resize.value);
+        if acknowledged {
+            resize.in_flight = false;
+            resize.value = resize.value.wrapping_add(1);
+            if let Some((rectangle, timestamp)) = resize.pending.take() {
+                let window = x::Window::new(self.xid(grab.node));
+                window::queue_sync_request(x11, window, timestamp, resize.value);
+                window::queue_move_resize(x11, window, rectangle);
+                resize.in_flight = true;
+                resize.next_poll = now + SYNC_RESIZE_POLL_INTERVAL;
+                resize.deadline = now + SYNC_RESIZE_TIMEOUT;
+            }
+            grab.sync_resize = Some(resize);
+            self.pointer_grab = Some(grab);
+            return Ok(true);
+        }
+        if now < resize.deadline {
+            grab.sync_resize = Some(resize);
+            self.pointer_grab = Some(grab);
+            return Ok(false);
+        }
+        grab.sync_resize = None;
+        if self.pointer_grab_is_live()
+            && let Some((rectangle, _)) = resize.pending
+        {
+            window::move_resize(x11, x::Window::new(self.xid(grab.node)), rectangle)?;
+        }
+        self.pointer_grab = Some(grab);
+        Ok(true)
+    }
+
     #[must_use]
     pub fn new(mut state: DaemonState) -> Self {
         state.running = true;
@@ -119,6 +279,11 @@ impl DaemonApp {
             pending_rules: Vec::new(),
             reaping_rules: Vec::new(),
             restored_subscribers: Vec::new(),
+            startup: crate::startup::StartupTracker::default(),
+            last_user_time: None,
+            user_time_windows: HashMap::new(),
+            sync_request_clients: HashMap::new(),
+            pending_ewmh_pings: HashMap::new(),
             mapped_feedbacks: HashSet::new(),
             window_index: RefCell::new(None),
         }
@@ -305,11 +470,16 @@ impl DaemonApp {
     fn update_ewmh(&self, x11: &X11) -> Result<(), RuntimeError> {
         ewmh::update_number_of_desktops(x11, self.world())?;
         ewmh::update_desktop_names(x11, self.world())?;
+        ewmh::update_desktop_geometry(x11)?;
         ewmh::update_desktop_viewports(x11, self.world())?;
+        ewmh::update_workareas(x11, self.world())?;
         ewmh::update_current_desktop(x11, self.world())?;
         ewmh::update_client_desktops(x11, self.world())?;
         ewmh::update_client_list(x11, self.world())?;
         ewmh::update_client_stacking_list(x11, self.world(), &self.state.stacking_order)?;
+        if self.state.settings.enable_ewmh_allowed_actions {
+            self.refresh_ewmh_allowed_actions(x11)?;
+        }
         Ok(ewmh::update_active_window(x11, self.world())?)
     }
 
@@ -382,6 +552,12 @@ impl RuntimeApp for DaemonApp {
 
     fn setup(&mut self, x11: &X11) -> Result<(), RuntimeError> {
         self.lock_masks = crate::pointer::LockMasks::query(x11)?;
+        if x11.extensions().sync.is_some() {
+            let _ = x11.request(&sync::Initialize {
+                desired_major_version: 3,
+                desired_minor_version: 1,
+            })?;
+        }
         self.mapping_filter = MappingFilterState::new(self.state.settings.mapping_events_count);
         if self.motion_recorder.is_none() {
             let window: x::Window = x11.connection().generate_id();
@@ -465,7 +641,10 @@ impl RuntimeApp for DaemonApp {
     }
 
     fn poll(&mut self, x11: &X11) -> Result<bool, RuntimeError> {
-        self.poll_pending_rules(x11)
+        let rules = self.poll_pending_rules(x11)?;
+        let resize = self.poll_sync_resize_timeout(x11)?;
+        let pings = self.poll_ewmh_ping_timeouts();
+        Ok(rules || resize || pings)
     }
 
     fn running(&self) -> bool {
@@ -486,6 +665,7 @@ impl RuntimeApp for DaemonApp {
 
     fn cleanup(&mut self, x11: &X11) -> Result<(), RuntimeError> {
         self.terminate_pending_rules();
+        self.pending_ewmh_pings.clear();
         if self.pointer_grab.take().is_some() {
             crate::pointer::ungrab_pointer(x11)?;
         }
@@ -618,5 +798,41 @@ mod tests {
         fs::remove_file(output).unwrap();
         fs::remove_file(release).unwrap();
         fs::remove_file(done).unwrap();
+    }
+
+    #[test]
+    fn ewmh_ping_acknowledgement_and_timeout_are_one_shot() {
+        let mut app = DaemonApp::default();
+        app.state.settings.enable_ewmh_ping = true;
+        app.pending_ewmh_pings.insert(
+            42,
+            PendingEwmhPing {
+                timestamp: 7,
+                deadline: Instant::now()
+                    .checked_sub(Duration::from_millis(1))
+                    .unwrap(),
+                expiration_observed: false,
+            },
+        );
+        assert!(!app.acknowledge_ewmh_ping(42, 8));
+        assert!(app.poll_ewmh_ping_timeouts());
+        assert!(app.pending_ewmh_pings.contains_key(&42));
+        assert!(app.acknowledge_ewmh_ping(42, 7));
+        assert!(!app.poll_ewmh_ping_timeouts());
+
+        app.pending_ewmh_pings.insert(
+            43,
+            PendingEwmhPing {
+                timestamp: 9,
+                deadline: Instant::now()
+                    .checked_sub(Duration::from_millis(1))
+                    .unwrap(),
+                expiration_observed: false,
+            },
+        );
+        assert!(app.poll_ewmh_ping_timeouts());
+        assert!(app.poll_ewmh_ping_timeouts());
+        assert!(!app.pending_ewmh_pings.contains_key(&43));
+        assert!(!app.poll_ewmh_ping_timeouts());
     }
 }

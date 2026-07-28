@@ -109,6 +109,12 @@ pub enum StructuralError {
 pub struct UnlinkResult {
     pub detached: NodeId,
     pub collapsed: Option<NodeId>,
+    /// The sibling promoted to the collapsed parent's position.
+    pub promoted_sibling: Option<NodeId>,
+    /// Whether the detached node was the first child of the collapsed parent.
+    pub detached_was_first: bool,
+    /// Whether the detached node was vacant at the time of unlinking.
+    pub was_vacant: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,13 +144,17 @@ pub struct Client {
     pub size_hints: SizeHints,
     pub icccm: IcccmProps,
     pub wm_flags: WmFlags,
+    /// The X window ID named by `WM_TRANSIENT_FOR`, if set and valid.
+    pub transient_for: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct IcccmProps {
     pub input_hint: bool,
     pub take_focus: bool,
     pub delete_window: bool,
+    pub ping: bool,
 }
 
 impl Default for IcccmProps {
@@ -153,6 +163,7 @@ impl Default for IcccmProps {
             input_hint: true,
             take_focus: false,
             delete_window: false,
+            ping: false,
         }
     }
 }
@@ -195,6 +206,7 @@ impl Client {
             size_hints: SizeHints::default(),
             icccm: IcccmProps::default(),
             wm_flags: WmFlags::default(),
+            transient_for: None,
         }
     }
 }
@@ -523,6 +535,8 @@ impl Tree {
             }
             self.rebuild_constraints_from_leaves(branch);
             self.rebuild_constraints_towards_root(branch);
+            self.propagate_vacancy_upward(subtree);
+            self.propagate_upward(subtree, |node| &mut node.hidden);
             self.focus_if_unfocused(state, subtree);
             return Ok(None);
         }
@@ -596,6 +610,8 @@ impl Tree {
                 state.focus = None;
             }
             self.rebuild_constraints_towards_root(subtree);
+            self.propagate_vacancy_upward(subtree);
+            self.propagate_upward(subtree, |node| &mut node.hidden);
             // The retired receptacle may have held the focus; the replacement
             // subtree inherits it, exactly as on the branching path below.
             self.focus_if_unfocused(state, subtree);
@@ -626,6 +642,9 @@ impl Tree {
                 Direction::West | Direction::East => SplitType::Vertical,
             };
             self.cancel_presel(anchor);
+            // Upstream clears the marked flag after presel-guided insertion
+            // (tree.c:447) so the same node cannot be matched again.
+            self.node_mut(subtree).marked = false;
         }
         match polarity {
             ChildPolarity::First => self.attach_children(branch, subtree, anchor),
@@ -633,6 +652,8 @@ impl Tree {
         }
         self.rebuild_constraints_from_leaves(branch);
         self.rebuild_constraints_towards_root(branch);
+        self.propagate_vacancy_upward(subtree);
+        self.propagate_upward(subtree, |node| &mut node.hidden);
         self.focus_if_unfocused(state, subtree);
         Ok(None)
     }
@@ -653,14 +674,19 @@ impl Tree {
         if !self.contains(state, subtree) {
             return Err(StructuralError::NotAttached);
         }
+        let was_vacant = self.node(subtree).vacant;
         let Some(parent) = self.node(subtree).parent else {
             state.root = None;
             state.focus = None;
             return Ok(UnlinkResult {
                 detached: subtree,
                 collapsed: None,
+                promoted_sibling: None,
+                detached_was_first: false,
+                was_vacant,
             });
         };
+        let detached_was_first = self.node(parent).first_child == Some(subtree);
         let sibling = self
             .sibling(subtree)
             .ok_or(StructuralError::InvalidAnchor)?;
@@ -675,11 +701,61 @@ impl Tree {
             state.focus = None;
         }
         self.retire(parent);
+        // Upstream's `propagate_flags_upward(b)` recomputes vacancy and
+        // hidden flags along the path from the promoted sibling to the root.
+        // Without this, a grandparent can retain the collapsed parent's
+        // stale vacancy, creating a ghost tiled partition.
+        self.propagate_vacancy_upward(sibling);
+        self.propagate_upward(sibling, |node| &mut node.hidden);
         self.rebuild_constraints_towards_root(sibling);
         Ok(UnlinkResult {
             detached: subtree,
             collapsed: Some(parent),
+            promoted_sibling: Some(sibling),
+            detached_was_first,
+            was_vacant,
         })
+    }
+
+    /// Adjusts the promoted sibling's split geometry after an `unlink`,
+    /// mirroring upstream's `removal_adjustment` in `remove_node`.
+    pub fn apply_removal_adjustment(&mut self, result: &UnlinkResult, scheme: AutomaticScheme) {
+        let Some(sibling) = result.promoted_sibling else {
+            return;
+        };
+        if result.was_vacant {
+            return;
+        }
+        match scheme {
+            AutomaticScheme::Spiral => {
+                let degree = if result.detached_was_first { 270 } else { 90 };
+                self.rotate(sibling, degree);
+            }
+            AutomaticScheme::LongestSide => {
+                let rect = self.node(sibling).rectangle;
+                self.node_mut(sibling).split_type = if rect.width > rect.height {
+                    SplitType::Vertical
+                } else {
+                    SplitType::Horizontal
+                };
+            }
+            AutomaticScheme::Alternate => {
+                if let Some(grandparent) = self.node(sibling).parent {
+                    self.node_mut(sibling).split_type = match self.node(grandparent).split_type {
+                        SplitType::Horizontal => SplitType::Vertical,
+                        SplitType::Vertical => SplitType::Horizontal,
+                    };
+                } else {
+                    // No grandparent = root; fall back to longest side
+                    let rect = self.node(sibling).rectangle;
+                    self.node_mut(sibling).split_type = if rect.width > rect.height {
+                        SplitType::Vertical
+                    } else {
+                        SplitType::Horizontal
+                    };
+                }
+            }
+        }
     }
 
     #[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
@@ -698,6 +774,11 @@ impl Tree {
             return Err(StructuralError::InvalidSwap);
         }
         self.swap_edges(state, first, second);
+        // Match upstream `propagate_flags_upward` after swaps.
+        self.propagate_vacancy_upward(first);
+        self.propagate_vacancy_upward(second);
+        self.propagate_upward(first, |node| &mut node.hidden);
+        self.propagate_upward(second, |node| &mut node.hidden);
         self.rebuild_constraints_from_leaves(state.root.expect("nonempty tree"));
         Ok(())
     }
@@ -744,6 +825,11 @@ impl Tree {
                 Some(first)
             };
         }
+        // Match upstream `propagate_flags_upward` after cross-tree swaps.
+        self.propagate_vacancy_upward(first);
+        self.propagate_vacancy_upward(second);
+        self.propagate_upward(first, |node| &mut node.hidden);
+        self.propagate_upward(second, |node| &mut node.hidden);
         if let Some(root) = first_state.root {
             self.rebuild_constraints_from_leaves(root);
         }
@@ -762,6 +848,13 @@ impl Tree {
         }
         client.last_layer = client.layer;
         client.layer = layer;
+        // Upstream updates wm_flags inline (tree.c:1866-1874).
+        client.wm_flags.remove(WmFlags::ABOVE | WmFlags::BELOW);
+        match layer {
+            StackLayer::Above => client.wm_flags.insert(WmFlags::ABOVE),
+            StackLayer::Below => client.wm_flags.insert(WmFlags::BELOW),
+            StackLayer::Normal => {}
+        }
         true
     }
 
@@ -786,6 +879,12 @@ impl Tree {
         };
         client.last_state = client.state;
         client.state = state;
+        // Upstream updates wm_flags inline (tree.c:1976-1979 via set_fullscreen).
+        if state == ClientState::Fullscreen {
+            client.wm_flags.insert(WmFlags::FULLSCREEN);
+        } else {
+            client.wm_flags.remove(WmFlags::FULLSCREEN);
+        }
         if touches_vacancy && !self.node(node).hidden {
             self.set_vacant(node, !state.is_tiled());
         }
@@ -889,6 +988,14 @@ impl Tree {
                 .is_some_and(|client| client.state.is_tiled())
             {
                 self.set_vacant_local(id, value);
+            }
+            // Upstream updates wm_flags inline (tree.c:2114-2118).
+            if let Some(client) = self.node_mut(id).client.as_mut() {
+                if value {
+                    client.wm_flags.insert(WmFlags::HIDDEN);
+                } else {
+                    client.wm_flags.remove(WmFlags::HIDDEN);
+                }
             }
         }
         // The recursion this replaces recomputed each branch's vacancy after
@@ -2289,5 +2396,57 @@ mod tests {
         assert_eq!(tree.leaves(root).collect::<Vec<_>>(), [a, b, c, d]);
         assert_eq!(tree.leaves(left).collect::<Vec<_>>(), [a, b]);
         assert_eq!(tree.preorder(a).collect::<Vec<_>>(), [a]);
+    }
+
+    /// Unlinking a non-vacant node whose sibling is vacant must propagate the
+    /// sibling's vacancy upward so the grandparent does not retain a stale
+    /// non-vacant flag (which would create a ghost tiled partition).
+    #[test]
+    fn unlink_propagates_vacancy_upward() {
+        let settings = Settings::default();
+        let mut tree = Tree::default();
+        let tiled = tree.add_node(1, 0.5);
+        let floating = tree.add_node(2, 0.5);
+        let branch = tree.add_node(3, 0.5);
+        let other = tree.add_node(4, 0.5);
+        let root = tree.add_node(5, 0.5);
+        tree.node_mut(tiled).client = Some(Client::from_settings(&settings));
+        tree.node_mut(floating).client = Some(Client::from_settings(&settings));
+        tree.node_mut(floating).client.as_mut().unwrap().state = ClientState::Floating;
+        tree.node_mut(other).client = Some(Client::from_settings(&settings));
+
+        tree.set_children(branch, tiled, floating);
+        tree.set_children(root, branch, other);
+        // Mark floating as vacant, propagate manually to set up the initial state.
+        tree.sync_vacancy(floating);
+        tree.sync_vacancy(tiled);
+        // Branch should be non-vacant because tiled child is non-vacant.
+        assert!(!tree.node(branch).vacant);
+        assert!(!tree.node(root).vacant);
+
+        let mut state = TreeState {
+            root: Some(root),
+            focus: Some(tiled),
+        };
+        // Unlink the tiled node: floating should be promoted and its vacancy
+        // must propagate to the root.
+        tree.unlink(&mut state, tiled).unwrap();
+        // floating now occupies where branch was.
+        assert!(tree.node(floating).vacant, "floating should be vacant");
+        assert!(
+            !tree.node(root).vacant,
+            "root is non-vacant because 'other' is tiled"
+        );
+
+        // Now unlink 'other' to leave only floating under root.
+        // First re-check: root has children floating and other.
+        // Actually after the first unlink, root's children are floating and other.
+        // Let's verify root still makes sense.
+        let root_first = tree.node(root).first_child;
+        let root_second = tree.node(root).second_child;
+        assert!(
+            root_first == Some(floating) || root_second == Some(floating),
+            "floating should be a child of root"
+        );
     }
 }

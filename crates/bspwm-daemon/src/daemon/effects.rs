@@ -108,7 +108,33 @@ impl DaemonApp {
         let window = value.external_id;
         self.client_mut(node).wm_flags = flags;
         let states = ewmh::wm_state_atoms(flags, x11.atoms());
-        Ok(ewmh::set_wm_state(x11, x::Window::new(window), &states)?)
+        ewmh::set_wm_state(x11, x::Window::new(window), &states)?;
+        if self.state.settings.enable_ewmh_allowed_actions {
+            let actions =
+                ewmh::allowed_action_atoms(self.world(), node, &self.state.settings, x11.atoms());
+            ewmh::set_allowed_actions(x11, x::Window::new(window), &actions)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn refresh_ewmh_allowed_actions(&self, x11: &X11) -> Result<(), RuntimeError> {
+        let enabled = self.state.settings.enable_ewmh_allowed_actions;
+        ewmh::set_supported(x11, enabled)?;
+        for node in self.all_client_nodes() {
+            let window = x::Window::new(self.xid(node));
+            if enabled {
+                let actions = ewmh::allowed_action_atoms(
+                    self.world(),
+                    node,
+                    &self.state.settings,
+                    x11.atoms(),
+                );
+                ewmh::set_allowed_actions(x11, window, &actions)?;
+            } else {
+                window::delete_property(x11, window, x11.atoms().net_wm_allowed_actions)?;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn refresh_colors(&self, x11: &X11) -> Result<(), RuntimeError> {
@@ -249,6 +275,9 @@ impl DaemonApp {
                         )?;
                     }
                 }
+                CommandEffect::RefreshEwmhAllowedActions => {
+                    self.refresh_ewmh_allowed_actions(x11)?;
+                }
                 CommandEffect::Focus {
                     monitor,
                     previous_monitor,
@@ -335,14 +364,10 @@ impl DaemonApp {
                 CommandEffect::AdoptOrphans => self.adopt_orphans(x11)?,
                 CommandEffect::Close { node } => {
                     for client in self.client_nodes(node) {
-                        let value = self.node(client);
-                        let Some(client) = value.client.as_ref() else {
-                            continue;
-                        };
-                        window::close_cached(
+                        self.close_client(
                             x11,
-                            x::Window::new(value.external_id),
-                            client.icccm.delete_window,
+                            client,
+                            self.last_user_time.unwrap_or(x::CURRENT_TIME),
                         )?;
                     }
                 }

@@ -6,8 +6,9 @@
 
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
-use xcb::{Xid, XidNew, x};
+use xcb::{Xid, XidNew, sync, x};
 
 use bspwm::daemon::{ClientInitial, DaemonApp, XEventContext};
 use bspwm::events::EventHandler;
@@ -17,7 +18,7 @@ use bspwm::runtime::RuntimeApp;
 use bspwm::settings::Settings;
 use bspwm::state::{CommandEffect, DaemonState};
 use bspwm::tree::{NodeId, SizeHints};
-use bspwm::types::{ClientState, Direction, Rectangle, StackLayer};
+use bspwm::types::{ClientState, Direction, Padding, Rectangle, StackLayer};
 use bspwm::world::{DesktopId, MonitorId};
 use bspwm::x11::X11;
 use bspwm::{monitor, restore, window};
@@ -70,7 +71,7 @@ fn manage_window(app: &mut DaemonApp, window: u32) -> (MonitorId, DesktopId, Nod
         &RuleConsequence::default(),
         Rectangle::new(0, 0, 1, 1),
         SizeHints::default(),
-        ClientInitial::default(),
+        &ClientInitial::default(),
         !window,
     )
     .unwrap()
@@ -89,7 +90,7 @@ fn manage_window_with(
         consequence,
         initial_rectangle,
         size_hints,
-        ClientInitial::default(),
+        &ClientInitial::default(),
         internal_xid,
     )
 }
@@ -99,6 +100,287 @@ fn manage_window_with(
 fn executes_action_plan_on_live_x_server() {
     let x11 = X11::connect(None).expect("connect to DISPLAY");
     DaemonApp::execute_plan(&x11, &[]).expect("execute empty plan");
+}
+
+#[test]
+#[ignore = "requires a live X server selected by DISPLAY"]
+#[allow(clippy::too_many_lines)]
+fn live_modern_ewmh_geometry_and_floating_moveresize_round_trip() {
+    let x11 = X11::connect(None).expect("connect to DISPLAY");
+    let (mut app, monitor, desktop) = app_with_desktop();
+    app.state.world.monitor_mut(monitor).padding = Padding {
+        top: 4,
+        right: 5,
+        bottom: 6,
+        left: 7,
+    };
+    app.state.pending_effects.push(CommandEffect::SyncEwmh);
+    app.execute_pending_effects(&x11).unwrap();
+    assert_eq!(
+        window::get_property::<u32>(&x11, x11.root(), x11.atoms().net_workarea, x::ATOM_CARDINAL,)
+            .unwrap(),
+        [7, 4, 88, 70]
+    );
+    let screen = x11.geometry();
+    assert_eq!(
+        window::get_property::<u32>(
+            &x11,
+            x11.root(),
+            x11.atoms().net_desktop_geometry,
+            x::ATOM_CARDINAL,
+        )
+        .unwrap(),
+        [u32::from(screen.width), u32::from(screen.height)]
+    );
+
+    let client: x::Window = x11.connection().generate_id();
+    create_live_window(&x11, client, false);
+    let mut consequence = make_rule_consequence();
+    consequence.state = Some(ClientState::Floating);
+    consequence.rect = Some(Rectangle::new(10, 11, 40, 30));
+    let node = manage_window_with(
+        &mut app,
+        client.resource_id(),
+        &consequence,
+        Rectangle::new(10, 11, 40, 30),
+        SizeHints::default(),
+        x11.connection().generate_id::<x::Window>().resource_id(),
+    )
+    .unwrap()
+    .2;
+    app.arrange_desktop(&x11, monitor, desktop).unwrap();
+    assert_eq!(
+        window::get_property::<u32>(
+            &x11,
+            client,
+            x11.atoms().net_frame_extents,
+            x::ATOM_CARDINAL,
+        )
+        .unwrap(),
+        [1, 1, 1, 1]
+    );
+
+    let direct = x::ClientMessageEvent::new(
+        client,
+        x11.atoms().net_moveresize_window,
+        x::ClientMessageData::Data32([1 | (0xF << 8) | (1 << 12), 20, 21, 55, 44]),
+    );
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .client_message(&direct)
+    .unwrap();
+    assert_eq!(
+        app.state
+            .world
+            .tree
+            .node(node)
+            .client
+            .as_ref()
+            .unwrap()
+            .floating_rectangle,
+        Rectangle::new(20, 21, 55, 44)
+    );
+    assert_eq!(
+        window::geometry(&x11, client).unwrap().rectangle,
+        Rectangle::new(20, 21, 55, 44)
+    );
+
+    let interactive = x::ClientMessageEvent::new(
+        client,
+        x11.atoms().net_wm_moveresize,
+        x::ClientMessageData::Data32([20, 21, 8, 1, 1]),
+    );
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .client_message(&interactive)
+    .unwrap();
+    let motion = |time, x, y| {
+        x::MotionNotifyEvent::new(
+            x::Motion::Normal,
+            time,
+            x11.root(),
+            client,
+            x::Window::none(),
+            x,
+            y,
+            0,
+            0,
+            x::KeyButMask::BUTTON1,
+            true,
+        )
+    };
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .motion_notify(&motion(100, 30, 31))
+    .unwrap();
+    assert_eq!(
+        window::geometry(&x11, client).unwrap().rectangle,
+        Rectangle::new(30, 31, 55, 44)
+    );
+    let cancel = x::ClientMessageEvent::new(
+        client,
+        x11.atoms().net_wm_moveresize,
+        x::ClientMessageData::Data32([0, 0, 11, 0, 1]),
+    );
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .client_message(&cancel)
+    .unwrap();
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .motion_notify(&motion(200, 40, 41))
+    .unwrap();
+    assert_eq!(
+        window::geometry(&x11, client).unwrap().rectangle,
+        Rectangle::new(30, 31, 55, 44)
+    );
+
+    let request_window: x::Window = x11.connection().generate_id();
+    create_live_window(&x11, request_window, false);
+    let request = x::ClientMessageEvent::new(
+        request_window,
+        x11.atoms().net_request_frame_extents,
+        x::ClientMessageData::Data32([0; 5]),
+    );
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .client_message(&request)
+    .unwrap();
+    assert_eq!(
+        window::get_property::<u32>(
+            &x11,
+            request_window,
+            x11.atoms().net_frame_extents,
+            x::ATOM_CARDINAL,
+        )
+        .unwrap(),
+        [1, 1, 1, 1]
+    );
+    window::destroy(&x11, client).ok();
+    window::destroy(&x11, request_window).ok();
+}
+
+#[test]
+#[ignore = "requires a live X server selected by DISPLAY"]
+#[allow(clippy::too_many_lines)]
+fn live_user_time_prevents_automatic_focus_stealing() {
+    let x11 = X11::connect(None).expect("connect to DISPLAY");
+    let (mut app, _, desktop) = app_with_desktop();
+    let first: x::Window = x11.connection().generate_id();
+    let stale: x::Window = x11.connection().generate_id();
+    let fresh: x::Window = x11.connection().generate_id();
+    let startup: x::Window = x11.connection().generate_id();
+    for window_id in [first, stale, fresh, startup] {
+        create_live_window(&x11, window_id, false);
+    }
+    window::set_property(
+        &x11,
+        first,
+        x11.atoms().net_wm_user_time,
+        x::ATOM_CARDINAL,
+        &[100_u32],
+    )
+    .unwrap();
+    let first_node = app
+        .schedule_window(&x11, first.resource_id())
+        .unwrap()
+        .unwrap()
+        .2;
+    assert_eq!(
+        app.state.world.desktop(desktop).tree.focus,
+        Some(first_node)
+    );
+
+    window::set_property(
+        &x11,
+        stale,
+        x11.atoms().net_wm_user_time,
+        x::ATOM_CARDINAL,
+        &[99_u32],
+    )
+    .unwrap();
+    let stale_node = app
+        .schedule_window(&x11, stale.resource_id())
+        .unwrap()
+        .unwrap()
+        .2;
+    assert_ne!(stale_node, first_node);
+    assert_eq!(
+        app.state.world.desktop(desktop).tree.focus,
+        Some(first_node)
+    );
+
+    window::set_property(
+        &x11,
+        fresh,
+        x11.atoms().net_wm_user_time,
+        x::ATOM_CARDINAL,
+        &[101_u32],
+    )
+    .unwrap();
+    let fresh_node = app
+        .schedule_window(&x11, fresh.resource_id())
+        .unwrap()
+        .unwrap()
+        .2;
+    assert_eq!(
+        app.state.world.desktop(desktop).tree.focus,
+        Some(fresh_node)
+    );
+
+    let mut first_fragment = [0_u8; 20];
+    first_fragment.copy_from_slice(b"new: ID=launch_TIME1");
+    let mut second_fragment = [0_u8; 20];
+    second_fragment[..3].copy_from_slice(b"02\0");
+    for (message_type, fragment) in [
+        (x11.atoms().net_startup_info_begin, first_fragment),
+        (x11.atoms().net_startup_info, second_fragment),
+    ] {
+        let message = x::ClientMessageEvent::new(
+            x11.root(),
+            message_type,
+            x::ClientMessageData::Data8(fragment),
+        );
+        XEventContext {
+            app: &mut app,
+            x11: &x11,
+        }
+        .client_message(&message)
+        .unwrap();
+    }
+    window::set_property(
+        &x11,
+        startup,
+        x11.atoms().net_startup_id,
+        x11.atoms().utf8_string,
+        b"launch_TIME102",
+    )
+    .unwrap();
+    let startup_node = app
+        .schedule_window(&x11, startup.resource_id())
+        .unwrap()
+        .unwrap()
+        .2;
+    assert_eq!(
+        app.state.world.desktop(desktop).tree.focus,
+        Some(startup_node)
+    );
+
+    for window_id in [first, stale, fresh, startup] {
+        window::destroy(&x11, window_id).ok();
+    }
 }
 
 #[test]
@@ -638,6 +920,521 @@ fn live_pointer_runtime_state_obeys_app_lifecycle() {
     assert!(app.motion_recorder.is_some());
     RuntimeApp::cleanup(&mut app, &x11).expect("clean up pointer runtime");
     assert!(app.motion_recorder.is_none());
+}
+
+#[test]
+#[ignore = "requires a live X server selected by DISPLAY"]
+fn live_click_on_focused_parent_preserves_override_redirect_popup_focus() {
+    let x11 = X11::connect(None).expect("connect to DISPLAY");
+    let (mut app, _, desktop) = app_with_desktop();
+    let client: x::Window = x11.connection().generate_id();
+    let popup: x::Window = x11.connection().generate_id();
+    create_live_window(&x11, client, false);
+    create_live_window(&x11, popup, true);
+    window::move_resize(&x11, popup, Rectangle::new(60, 40, 20, 20)).unwrap();
+    x11.send_and_check_request(&x::MapWindow { window: client })
+        .unwrap();
+    x11.send_and_check_request(&x::MapWindow { window: popup })
+        .unwrap();
+    let node = manage_window(&mut app, client.resource_id()).2;
+    app.state.world.desktop_mut(desktop).tree.focus = Some(node);
+    window::focus(&x11, popup).unwrap();
+    window::warp_pointer(&x11, 10, 10).unwrap();
+
+    let event = x::ButtonPressEvent::new(
+        1,
+        x::CURRENT_TIME,
+        x11.root(),
+        client,
+        x::WINDOW_NONE,
+        10,
+        10,
+        10,
+        10,
+        x::KeyButMask::empty(),
+        true,
+    );
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .button_press(&event)
+    .unwrap();
+
+    assert_eq!(
+        x11.request(&x::GetInputFocus {}).unwrap().focus(),
+        popup,
+        "click replay must not steal focus from an override-redirect popup",
+    );
+    x11.send_and_check_request(&x::DestroyWindow { window: popup })
+        .unwrap();
+    x11.send_and_check_request(&x::DestroyWindow { window: client })
+        .unwrap();
+}
+
+#[test]
+#[ignore = "requires a live X server with the Sync extension selected by DISPLAY"]
+#[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
+fn live_sync_resize_coalesces_acknowledgements_and_times_out_safely() {
+    let x11 = X11::connect(None).expect("connect to DISPLAY");
+    x11.request(&sync::Initialize {
+        desired_major_version: 3,
+        desired_minor_version: 1,
+    })
+    .expect("initialize XSync");
+    let (mut app, _, _) = app_with_desktop();
+    app.state.settings.pointer_resize_sync = true;
+    let client: x::Window = x11.connection().generate_id();
+    let counter: sync::Counter = x11.connection().generate_id();
+    create_live_window(&x11, client, false);
+    x11.send_and_check_request(&sync::CreateCounter {
+        id: counter,
+        initial_value: sync::Int64 { hi: 0, lo: 0 },
+    })
+    .unwrap();
+    window::set_property(
+        &x11,
+        client,
+        x11.atoms().wm_protocols,
+        x::ATOM_ATOM,
+        &[x11.atoms().net_wm_sync_request],
+    )
+    .unwrap();
+    window::set_property(
+        &x11,
+        client,
+        x11.atoms().net_wm_sync_request_counter,
+        x::ATOM_CARDINAL,
+        &[counter.resource_id()],
+    )
+    .unwrap();
+    x11.send_and_check_request(&x::MapWindow { window: client })
+        .unwrap();
+    let node = app
+        .schedule_window(&x11, client.resource_id())
+        .unwrap()
+        .unwrap()
+        .2;
+    let initial = Rectangle::new(0, 0, 40, 30);
+    let managed = app.state.world.tree.node_mut(node).client.as_mut().unwrap();
+    managed.state = ClientState::Floating;
+    managed.floating_rectangle = initial;
+    window::move_resize(&x11, client, initial).unwrap();
+
+    let begin = x::ClientMessageEvent::new(
+        client,
+        x11.atoms().net_wm_moveresize,
+        x::ClientMessageData::Data32([40, 30, 4, 1, 1]),
+    );
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .client_message(&begin)
+    .unwrap();
+    let motion = |time, x, y| {
+        x::MotionNotifyEvent::new(
+            x::Motion::Normal,
+            time,
+            x11.root(),
+            client,
+            x::WINDOW_NONE,
+            x,
+            y,
+            x,
+            y,
+            x::KeyButMask::BUTTON1,
+            true,
+        )
+    };
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .motion_notify(&motion(100, 50, 40))
+    .unwrap();
+    let first = window::geometry(&x11, client).unwrap().rectangle;
+    assert_eq!(first, Rectangle::new(0, 0, 50, 40));
+
+    let mut requested_value = None;
+    while let Some(event) = x11.poll_for_event().unwrap() {
+        if let xcb::Event::X(x::Event::ClientMessage(message)) = &event
+            && message.r#type() == x11.atoms().wm_protocols
+            && let x::ClientMessageData::Data32(data) = message.data()
+            && data[0] == x11.atoms().net_wm_sync_request.resource_id()
+        {
+            requested_value = Some((u64::from(data[3]) << 32) | u64::from(data[2]));
+        } else {
+            RuntimeApp::handle_event(&mut app, Ok(event), &x11).unwrap();
+        }
+    }
+    let requested_value = requested_value.expect("client received a sync request");
+
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .motion_notify(&motion(120, 60, 50))
+    .unwrap();
+    assert_eq!(
+        window::geometry(&x11, client).unwrap().rectangle,
+        first,
+        "the second configure remains coalesced while the first is in flight",
+    );
+
+    x11.send_and_check_request(&sync::SetCounter {
+        counter,
+        value: sync::Int64 {
+            hi: (requested_value >> 32) as i32,
+            lo: requested_value as u32,
+        },
+    })
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(12));
+    assert!(RuntimeApp::poll(&mut app, &x11).unwrap());
+    assert_eq!(
+        window::geometry(&x11, client).unwrap().rectangle,
+        Rectangle::new(0, 0, 60, 50),
+        "the acknowledgement releases only the latest pending rectangle",
+    );
+
+    let mut second_value = None;
+    while let Some(event) = x11.poll_for_event().unwrap() {
+        if let xcb::Event::X(x::Event::ClientMessage(message)) = &event
+            && message.r#type() == x11.atoms().wm_protocols
+            && let x::ClientMessageData::Data32(data) = message.data()
+            && data[0] == x11.atoms().net_wm_sync_request.resource_id()
+        {
+            second_value = Some((u64::from(data[3]) << 32) | u64::from(data[2]));
+        } else {
+            RuntimeApp::handle_event(&mut app, Ok(event), &x11).unwrap();
+        }
+    }
+    let second_value = second_value.expect("client received the coalesced sync request");
+    assert_ne!(second_value, requested_value);
+    x11.send_and_check_request(&sync::SetCounter {
+        counter,
+        value: sync::Int64 {
+            hi: (second_value >> 32) as i32,
+            lo: second_value as u32,
+        },
+    })
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(12));
+    assert!(RuntimeApp::poll(&mut app, &x11).unwrap());
+
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .motion_notify(&motion(140, 70, 60))
+    .unwrap();
+    assert_eq!(
+        window::geometry(&x11, client).unwrap().rectangle,
+        Rectangle::new(0, 0, 70, 60),
+        "a resize after an idle acknowledgement starts a fresh request",
+    );
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .motion_notify(&motion(160, 80, 70))
+    .unwrap();
+    assert_eq!(
+        window::geometry(&x11, client).unwrap().rectangle,
+        Rectangle::new(0, 0, 70, 60)
+    );
+    std::thread::sleep(Duration::from_millis(275));
+    assert!(RuntimeApp::poll(&mut app, &x11).unwrap());
+    assert_eq!(
+        window::geometry(&x11, client).unwrap().rectangle,
+        Rectangle::new(0, 0, 80, 70),
+        "a client that stops acknowledging falls back to the latest geometry",
+    );
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .motion_notify(&motion(180, 90, 80))
+    .unwrap();
+    assert_eq!(
+        window::geometry(&x11, client).unwrap().rectangle,
+        Rectangle::new(0, 0, 90, 80),
+        "the remainder of a timed-out drag uses immediate resize",
+    );
+
+    let release = x::ButtonReleaseEvent::new(
+        1,
+        130,
+        x11.root(),
+        client,
+        x::WINDOW_NONE,
+        90,
+        80,
+        90,
+        80,
+        x::KeyButMask::empty(),
+        true,
+    );
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .button_release(&release)
+    .unwrap();
+    x11.send_and_check_request(&sync::DestroyCounter { counter })
+        .unwrap();
+    x11.send_and_check_request(&x::DestroyWindow { window: client })
+        .unwrap();
+}
+
+#[test]
+#[ignore = "requires a live X server selected by DISPLAY"]
+#[allow(clippy::too_many_lines)]
+fn live_legacy_strut_ping_and_allowed_actions_are_compatible() {
+    let x11 = X11::connect(None).expect("connect to DISPLAY");
+    let strut_window: x::Window = x11.connection().generate_id();
+    create_live_window(&x11, strut_window, false);
+    window::set_property(
+        &x11,
+        strut_window,
+        x11.atoms().net_wm_strut,
+        x::ATOM_CARDINAL,
+        &[0_u32, 0, 12, 0],
+    )
+    .unwrap();
+    let legacy = bspwm::ewmh::get_strut_partial(&x11, strut_window)
+        .unwrap()
+        .unwrap();
+    assert_eq!(legacy.top, 12);
+    assert_eq!(legacy.top_end_x, u32::from(x11.geometry().width) - 1);
+    window::set_property(
+        &x11,
+        strut_window,
+        x11.atoms().net_wm_strut_partial,
+        x::ATOM_CARDINAL,
+        &[1_u32; 11],
+    )
+    .unwrap();
+    assert!(
+        bspwm::ewmh::get_strut_partial(&x11, strut_window)
+            .unwrap()
+            .is_none()
+    );
+    window::set_property(
+        &x11,
+        strut_window,
+        x11.atoms().net_wm_strut_partial,
+        x::ATOM_CARDINAL,
+        &[
+            0_u32,
+            0,
+            20,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            u32::from(x11.geometry().width) - 1,
+            0,
+            0,
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        bspwm::ewmh::get_strut_partial(&x11, strut_window)
+            .unwrap()
+            .unwrap()
+            .top,
+        20,
+    );
+
+    window::delete_property(&x11, strut_window, x11.atoms().net_wm_strut_partial).unwrap();
+    window::set_property(
+        &x11,
+        strut_window,
+        x11.atoms().net_wm_window_type,
+        x::ATOM_ATOM,
+        &[x11.atoms().net_wm_window_type_dock],
+    )
+    .unwrap();
+    x11.send_and_check_request(&x::MapWindow {
+        window: strut_window,
+    })
+    .unwrap();
+    let (mut app, monitor, _) = app_with_desktop();
+    assert!(
+        app.schedule_window(&x11, strut_window.resource_id())
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(app.state.world.monitor(monitor).padding.top, 12);
+
+    let client: x::Window = x11.connection().generate_id();
+    create_live_window(&x11, client, false);
+    window::set_property(
+        &x11,
+        client,
+        x11.atoms().wm_protocols,
+        x::ATOM_ATOM,
+        &[x11.atoms().wm_delete_window, x11.atoms().net_wm_ping],
+    )
+    .unwrap();
+    x11.send_and_check_request(&x::MapWindow { window: client })
+        .unwrap();
+    let node = app
+        .schedule_window(&x11, client.resource_id())
+        .unwrap()
+        .unwrap()
+        .2;
+    assert!(
+        window::get_property::<u32>(
+            &x11,
+            client,
+            x11.atoms().net_wm_allowed_actions,
+            x::ATOM_ATOM,
+        )
+        .unwrap()
+        .is_empty()
+    );
+    app.state.settings.enable_ewmh_allowed_actions = true;
+    app.state
+        .pending_effects
+        .push(CommandEffect::RefreshEwmhAllowedActions);
+    app.execute_pending_effects(&x11).unwrap();
+    assert!(
+        window::get_property::<u32>(&x11, x11.root(), x11.atoms().net_supported, x::ATOM_ATOM,)
+            .unwrap()
+            .contains(&x11.atoms().net_wm_allowed_actions.resource_id())
+    );
+    let tiled_actions = window::get_property::<u32>(
+        &x11,
+        client,
+        x11.atoms().net_wm_allowed_actions,
+        x::ATOM_ATOM,
+    )
+    .unwrap();
+    assert!(tiled_actions.contains(&x11.atoms().net_wm_action_close.resource_id()));
+    assert!(!tiled_actions.contains(&x11.atoms().net_wm_action_move.resource_id()));
+    app.state
+        .world
+        .tree
+        .node_mut(node)
+        .client
+        .as_mut()
+        .unwrap()
+        .state = ClientState::Floating;
+    app.state
+        .pending_effects
+        .push(CommandEffect::SyncWindowState { node });
+    app.execute_pending_effects(&x11).unwrap();
+    let floating_actions = window::get_property::<u32>(
+        &x11,
+        client,
+        x11.atoms().net_wm_allowed_actions,
+        x::ATOM_ATOM,
+    )
+    .unwrap();
+    assert!(floating_actions.contains(&x11.atoms().net_wm_action_move.resource_id()));
+    assert!(floating_actions.contains(&x11.atoms().net_wm_action_resize.resource_id()));
+    app.state.settings.enable_ewmh_allowed_actions = false;
+    app.state
+        .pending_effects
+        .push(CommandEffect::RefreshEwmhAllowedActions);
+    app.execute_pending_effects(&x11).unwrap();
+    assert!(
+        !window::get_property::<u32>(&x11, x11.root(), x11.atoms().net_supported, x::ATOM_ATOM,)
+            .unwrap()
+            .contains(&x11.atoms().net_wm_allowed_actions.resource_id())
+    );
+    assert!(
+        window::get_property::<u32>(
+            &x11,
+            client,
+            x11.atoms().net_wm_allowed_actions,
+            x::ATOM_ATOM,
+        )
+        .unwrap()
+        .is_empty()
+    );
+
+    while x11.poll_for_event().unwrap().is_some() {}
+    let close = |timestamp| {
+        x::ClientMessageEvent::new(
+            client,
+            x11.atoms().net_close_window,
+            x::ClientMessageData::Data32([timestamp, 1, 0, 0, 0]),
+        )
+    };
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .client_message(&close(41))
+    .unwrap();
+    x11.flush().unwrap();
+    window::geometry(&x11, client).unwrap();
+    let mut protocols = Vec::new();
+    while let Some(event) = x11.poll_for_event().unwrap() {
+        if let xcb::Event::X(x::Event::ClientMessage(message)) = event
+            && message.r#type() == x11.atoms().wm_protocols
+            && let x::ClientMessageData::Data32(data) = message.data()
+        {
+            protocols.push(data[0]);
+        }
+    }
+    assert_eq!(protocols, [x11.atoms().wm_delete_window.resource_id()]);
+
+    app.state.settings.enable_ewmh_ping = true;
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .client_message(&close(42))
+    .unwrap();
+    x11.flush().unwrap();
+    window::geometry(&x11, client).unwrap();
+    let mut protocols = Vec::new();
+    while let Some(event) = x11.poll_for_event().unwrap() {
+        if let xcb::Event::X(x::Event::ClientMessage(message)) = event
+            && message.r#type() == x11.atoms().wm_protocols
+            && let x::ClientMessageData::Data32(data) = message.data()
+        {
+            protocols.push(data[0]);
+        }
+    }
+    assert_eq!(
+        protocols,
+        [
+            x11.atoms().wm_delete_window.resource_id(),
+            x11.atoms().net_wm_ping.resource_id(),
+        ]
+    );
+    let reply = x::ClientMessageEvent::new(
+        x11.root(),
+        x11.atoms().wm_protocols,
+        x::ClientMessageData::Data32([
+            x11.atoms().net_wm_ping.resource_id(),
+            42,
+            client.resource_id(),
+            0,
+            0,
+        ]),
+    );
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .client_message(&reply)
+    .unwrap();
+
+    x11.send_and_check_request(&x::DestroyWindow { window: client })
+        .unwrap();
+    x11.send_and_check_request(&x::DestroyWindow {
+        window: strut_window,
+    })
+    .unwrap();
 }
 
 fn create_live_window(x11: &X11, window: x::Window, override_redirect: bool) {

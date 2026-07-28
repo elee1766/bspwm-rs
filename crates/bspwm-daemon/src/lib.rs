@@ -15,6 +15,7 @@ pub mod query;
 pub mod restore;
 pub mod rule;
 pub mod runtime;
+mod startup;
 pub mod state;
 pub mod subscribe;
 pub mod window;

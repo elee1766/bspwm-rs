@@ -3,7 +3,7 @@
 use xcb::{Xid, XidNew, x};
 
 use super::XEventContext;
-use crate::daemon::PointerGrab;
+use crate::daemon::{PointerGrab, PointerGrabOrigin};
 use crate::events::MotionDisposition;
 use crate::monitor;
 use crate::runtime::RuntimeError;
@@ -12,6 +12,35 @@ use crate::types::{ClientState, Point, PointerAction, Rectangle, ResizeHandle};
 use crate::window;
 
 impl XEventContext<'_> {
+    fn resize_grabbed_floating_client(
+        &mut self,
+        grab: PointerGrab,
+        client: &crate::tree::Client,
+        position: Point,
+    ) -> Rectangle {
+        let dx = position.x - grab.last_position.x;
+        let dy = position.y - grab.last_position.y;
+        let input = if client.honor_size_hints.should_honor(client.state) {
+            crate::pointer::ResizeInput::Absolute(position)
+        } else {
+            crate::pointer::ResizeInput::Relative { dx, dy }
+        };
+        let mut rectangle =
+            crate::pointer::plan_floating_resize(client.floating_rectangle, grab.handle, input);
+        let (width, height) =
+            crate::arrange::apply_size_hints(client, rectangle.width, rectangle.height);
+        if grab.handle.contains(ResizeHandle::LEFT) {
+            rectangle.x += rectangle.width - width;
+        }
+        if grab.handle.contains(ResizeHandle::TOP) {
+            rectangle.y += rectangle.height - height;
+        }
+        rectangle.width = width;
+        rectangle.height = height;
+        self.client_mut(grab.node).floating_rectangle = rectangle;
+        rectangle
+    }
+
     pub(super) fn on_enter_notify(
         &mut self,
         event: &x::EnterNotifyEvent,
@@ -101,6 +130,11 @@ impl XEventContext<'_> {
                 self.app.pointer_grab = None;
                 return Ok(());
             };
+            if matches!(grab.origin, PointerGrabOrigin::Ewmh { .. })
+                && client.state != ClientState::Floating
+            {
+                return self.finish_pointer_grab();
+            }
             match grab.action {
                 PointerAction::Move if client.state.is_tiled() => {
                     let (pointer_window, point) = self.query_pointer()?;
@@ -173,31 +207,18 @@ impl XEventContext<'_> {
                         self.app
                             .arrange_desktop_quiet(self.x11, grab.monitor, grab.desktop)?;
                     } else {
-                        let mut rectangle = crate::pointer::plan_floating_resize(
-                            client.floating_rectangle,
-                            grab.handle,
-                            input,
-                        );
-                        let (width, height) = crate::arrange::apply_size_hints(
-                            &client,
-                            rectangle.width,
-                            rectangle.height,
-                        );
-                        if grab.handle.contains(ResizeHandle::LEFT) {
-                            rectangle.x += rectangle.width - width;
-                        }
-                        if grab.handle.contains(ResizeHandle::TOP) {
-                            rectangle.y += rectangle.height - height;
-                        }
-                        rectangle.width = width;
-                        rectangle.height = height;
-                        self.client_mut(grab.node).floating_rectangle = rectangle;
+                        let rectangle =
+                            self.resize_grabbed_floating_client(grab, &client, position);
                         if client.state == ClientState::Floating {
-                            window::move_resize(
-                                self.x11,
-                                x::Window::new(self.xid(grab.node)),
-                                rectangle,
-                            )?;
+                            if grab.sync_resize.is_some() {
+                                self.send_sync_resize(&mut grab, rectangle, event.time());
+                            } else {
+                                window::move_resize(
+                                    self.x11,
+                                    x::Window::new(self.xid(grab.node)),
+                                    rectangle,
+                                )?;
+                            }
                         } else {
                             self.app
                                 .arrange_desktop_quiet(self.x11, grab.monitor, grab.desktop)?;
@@ -247,6 +268,7 @@ impl XEventContext<'_> {
         &mut self,
         event: &x::ButtonPressEvent,
     ) -> Result<(), RuntimeError> {
+        self.app.note_user_time(event.time());
         let action = crate::pointer::resolve_button_action(
             event.detail(),
             u16::try_from(event.state().bits() & u32::from(u16::MAX))
@@ -288,6 +310,14 @@ impl XEventContext<'_> {
                                 handle: crate::pointer::resize_handle(rectangle, position, action),
                                 last_position: position,
                                 last_motion_time: 0,
+                                origin: PointerGrabOrigin::Binding,
+                                sync_resize: (client.state == ClientState::Floating
+                                    && matches!(
+                                        action,
+                                        PointerAction::ResizeSide | PointerAction::ResizeCorner
+                                    ))
+                                .then(|| self.begin_sync_resize(node))
+                                .flatten(),
                             };
                             self.app.pointer_grab = Some(grab);
                             self.pointer_status(grab, "begin");
@@ -309,31 +339,34 @@ impl XEventContext<'_> {
 
     pub(super) fn on_button_release(
         &mut self,
-        _event: &x::ButtonReleaseEvent,
+        event: &x::ButtonReleaseEvent,
     ) -> Result<(), RuntimeError> {
-        let live = self.app.pointer_grab_is_live();
-        let Some(grab) = self.app.pointer_grab.take() else {
+        let Some(mut grab) = self.app.pointer_grab else {
             return Ok(());
         };
-        crate::pointer::ungrab_pointer(self.x11)?;
-        // A grab whose subject was removed mid-drag has nothing left to report.
-        if !live {
+        if let PointerGrabOrigin::Ewmh { button } = grab.origin
+            && button != 0
+            && event.detail() != button
+        {
             return Ok(());
         }
-        self.pointer_status(grab, "end");
-        let tiled_change = self.client_of(grab.node).is_some_and(|client| {
-            grab.action == PointerAction::Move && client.state.is_tiled()
-                || matches!(
-                    grab.action,
-                    PointerAction::ResizeSide | PointerAction::ResizeCorner
-                ) && client.state == ClientState::Tiled
-        });
-        if tiled_change {
-            self.publish_desktop_geometry(grab.monitor, grab.desktop);
-        } else {
-            self.publish_geometry(grab.monitor, grab.desktop, grab.node);
+        if grab.sync_resize.is_some()
+            && self.app.pointer_grab_is_live()
+            && matches!(
+                grab.action,
+                PointerAction::ResizeSide | PointerAction::ResizeCorner
+            )
+        {
+            let position = Point::from_x11(event.root_x(), event.root_y());
+            if position != grab.last_position {
+                let client = self.client(grab.node).clone();
+                let rectangle = self.resize_grabbed_floating_client(grab, &client, position);
+                self.send_sync_resize(&mut grab, rectangle, event.time());
+                grab.last_position = position;
+                self.app.pointer_grab = Some(grab);
+            }
         }
-        Ok(())
+        self.finish_pointer_grab()
     }
 
     pub(super) fn on_focus_in(&mut self, event: &x::FocusInEvent) -> Result<(), RuntimeError> {

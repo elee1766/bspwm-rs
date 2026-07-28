@@ -190,6 +190,8 @@ pub(crate) struct ClientDto<'a> {
     pub shown: bool,
     pub tiled_rectangle: Rectangle,
     pub floating_rectangle: Rectangle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transient_for: Option<u32>,
 }
 
 impl<'a> From<&'a Client> for ClientDto<'a> {
@@ -206,6 +208,7 @@ impl<'a> From<&'a Client> for ClientDto<'a> {
             shown: client.shown,
             tiled_rectangle: client.tiled_rectangle,
             floating_rectangle: client.floating_rectangle,
+            transient_for: client.transient_for,
         }
     }
 }

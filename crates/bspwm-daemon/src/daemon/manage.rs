@@ -1,11 +1,12 @@
 //! Window adoption: scheduling, rule resolution, bookkeeping, and removal.
 
-use xcb::{Xid, XidNew, x};
+use xcb::{Xid, XidNew, sync, x};
 
 use super::action::XAction;
 use super::events::XEventContext;
 use super::{DaemonApp, WindowLocation};
 use crate::events::EventHandler;
+use crate::ewmh;
 use crate::monitor;
 use crate::rule::{
     ExternalRuleProcess, RuleConsequence, apply_builtin_rules, make_rule_consequence,
@@ -48,11 +49,16 @@ pub(super) struct PendingRule {
 
 /// The per-client X state a rule consequence cannot supply.
 #[doc(hidden)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ClientInitial {
     icccm: IcccmProps,
     urgent: bool,
     wm_flags: WmFlags,
+    user_time: Option<x::Timestamp>,
+    user_time_window: Option<u32>,
+    startup_id: Option<String>,
+    sync_request_counter: Option<sync::Counter>,
+    transient_for: Option<u32>,
 }
 
 impl DaemonApp {
@@ -64,7 +70,7 @@ impl DaemonApp {
         consequence: &RuleConsequence,
         initial_rectangle: Rectangle,
         size_hints: SizeHints,
-        client_initial: ClientInitial,
+        client_initial: &ClientInitial,
         internal_xid: u32,
     ) -> Option<WindowLocation> {
         if let Some(location) = self.managed_window(window) {
@@ -197,6 +203,10 @@ impl DaemonApp {
         client.icccm = client_initial.icccm;
         client.urgent = client_initial.urgent;
         client.wm_flags = client_initial.wm_flags;
+        client.transient_for = client_initial.transient_for;
+        if let Some(counter) = client_initial.sync_request_counter {
+            self.sync_request_clients.insert(window, counter);
+        }
         let receives_focus = !consequence.hidden
             && consequence.focus
             && (self.world().monitor(monitor).active_desktop == Some(desktop)
@@ -375,6 +385,11 @@ impl DaemonApp {
                         icccm: properties.icccm,
                         urgent: properties.urgent,
                         wm_flags: properties.wm_flags,
+                        user_time: properties.user_time,
+                        user_time_window: properties.user_time_window,
+                        startup_id: properties.startup_id,
+                        sync_request_counter: properties.sync_request_counter,
+                        transient_for: properties.transient_for,
                     },
                     desktop_window,
                     process,
@@ -390,10 +405,15 @@ impl DaemonApp {
             &consequence,
             properties.geometry.rectangle,
             properties.size_hints,
-            ClientInitial {
+            &ClientInitial {
                 icccm: properties.icccm,
                 urgent: properties.urgent,
                 wm_flags: properties.wm_flags,
+                user_time: properties.user_time,
+                user_time_window: properties.user_time_window,
+                startup_id: properties.startup_id,
+                sync_request_counter: properties.sync_request_counter,
+                transient_for: properties.transient_for,
             },
             desktop_window,
         )
@@ -407,7 +427,7 @@ impl DaemonApp {
         consequence: &RuleConsequence,
         initial_rectangle: Rectangle,
         size_hints: SizeHints,
-        client_initial: ClientInitial,
+        client_initial: &ClientInitial,
         desktop_window: bool,
     ) -> Result<Option<WindowLocation>, RuntimeError> {
         let window_id_typed = x::Window::new(window_id);
@@ -415,22 +435,32 @@ impl DaemonApp {
             return Ok(None);
         }
         if !self.state.settings.ignore_ewmh_struts && self.apply_strut(x11, window_id_typed)? {
+            let _ = window::listen_for_property_changes(x11, window_id_typed);
             self.arrange_all(x11)?;
+            ewmh::update_workareas(x11, self.world())?;
         }
         if !consequence.manage {
             let mut plan = Vec::new();
             if desktop_window {
                 plan.push(XAction::Lower { window: window_id });
             }
+            plan.push(XAction::SetWmStateNormal { window: window_id });
             plan.push(XAction::Map { window: window_id });
             Self::execute_plan(x11, &plan)?;
             return Ok(None);
         }
 
+        let focus_allowed = self.initial_focus_allowed(client_initial);
+        let mut consequence = consequence.clone();
+        if consequence.focus && !focus_allowed {
+            consequence.focus = false;
+        }
+        let user_time_window = client_initial.user_time_window;
+        let user_time = client_initial.user_time;
         let internal_xid = x11.connection().generate_id::<x::Window>().resource_id();
         let Some(location) = self.manage_window_with_initial(
             window_id,
-            consequence,
+            &consequence,
             initial_rectangle,
             size_hints,
             client_initial,
@@ -439,6 +469,17 @@ impl DaemonApp {
             return Ok(None);
         };
         let (monitor, desktop, node) = location;
+        if let Some(auxiliary) = user_time_window
+            && auxiliary != window_id
+            && window::listen_for_property_changes(x11, x::Window::new(auxiliary)).is_ok()
+        {
+            self.user_time_windows.insert(auxiliary, window_id);
+        }
+        if consequence.focus
+            && let Some(user_time) = user_time
+        {
+            self.note_user_time(user_time);
+        }
         self.destroy_retired_feedbacks(x11)?;
         self.arrange_desktop(x11, monitor, desktop)?;
         let mut plan = Vec::new();
@@ -485,6 +526,39 @@ impl DaemonApp {
         Ok(Some(location))
     }
 
+    fn initial_focus_allowed(&self, initial: &ClientInitial) -> bool {
+        if initial.user_time == Some(0) {
+            return false;
+        }
+        let mut candidate = initial.user_time;
+        if let Some(startup_time) = initial
+            .startup_id
+            .as_deref()
+            .and_then(|id| self.startup.timestamp(id))
+            && candidate.is_none_or(|time| timestamp_is_later(startup_time, time))
+        {
+            candidate = Some(startup_time);
+        }
+        let (Some(candidate), Some(last_user_time)) = (candidate, self.last_user_time) else {
+            return true;
+        };
+        candidate == last_user_time || timestamp_is_later(candidate, last_user_time)
+    }
+
+    pub(super) fn note_user_time(&mut self, timestamp: x::Timestamp) {
+        if timestamp != 0
+            && self
+                .last_user_time
+                .is_none_or(|current| timestamp_is_later(timestamp, current))
+        {
+            self.last_user_time = Some(timestamp);
+        }
+    }
+
+    pub(super) fn user_time_owner(&self, window: u32) -> Option<u32> {
+        self.user_time_windows.get(&window).copied()
+    }
+
     pub(super) fn poll_pending_rules(&mut self, x11: &X11) -> Result<bool, RuntimeError> {
         self.reaping_rules.retain_mut(|process| !process.reap());
         let completed: Vec<PendingRule> = self
@@ -505,7 +579,7 @@ impl DaemonApp {
                 &pending.consequence,
                 pending.initial_rectangle,
                 pending.size_hints,
-                pending.client_initial,
+                &pending.client_initial,
                 pending.desktop_window,
             )?;
             if location.is_some() {
@@ -589,8 +663,43 @@ impl DaemonApp {
         )
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(super) fn forget_window(&mut self, window: u32) -> Option<(MonitorId, DesktopId)> {
         let (monitor, desktop, node) = self.managed_window(window)?;
+        self.user_time_windows.retain(|_, owner| *owner != window);
+        self.sync_request_clients.remove(&window);
+        self.pending_ewmh_pings.remove(&window);
+        if self.pointer_grab.as_ref().is_some_and(|grab| {
+            self.state
+                .world
+                .tree
+                .get(grab.node)
+                .is_some_and(|n| n.external_id == window)
+        }) {
+            self.pointer_grab = None;
+        }
+        // Clear stale transient-parent references so the XID cannot bind to
+        // an unrelated future window.
+        let orphans: Vec<_> = self
+            .state
+            .stacking_order
+            .nodes()
+            .iter()
+            .copied()
+            .filter(|n| {
+                self.state
+                    .world
+                    .tree
+                    .get(*n)
+                    .and_then(|nd| nd.client.as_ref())
+                    .is_some_and(|c| c.transient_for == Some(window))
+            })
+            .collect();
+        for orphan in orphans {
+            if let Some(client) = self.node_mut(orphan).client.as_mut() {
+                client.transient_for = None;
+            }
+        }
         let was_sticky = self.node(node).sticky;
         let status = format!(
             "node_remove {} 0x{window:08X}\n",
@@ -605,8 +714,13 @@ impl DaemonApp {
             .remove_subtree(&self.state.world.tree, node);
         self.tree_mut().cancel_presel(node);
         let mut tree_state = self.world().desktop(desktop).tree;
-        if self.tree_mut().unlink(&mut tree_state, node).is_err() {
+        let Ok(unlink_result) = self.tree_mut().unlink(&mut tree_state, node) else {
             return None;
+        };
+        if self.state.settings.removal_adjustment {
+            let scheme = self.state.settings.automatic_scheme;
+            self.tree_mut()
+                .apply_removal_adjustment(&unlink_result, scheme);
         }
         // `unlink` only detaches: the node is now unreachable from any desktop,
         // so this is where upstream `free`s it.
@@ -681,10 +795,18 @@ impl DaemonApp {
                 .pending_effects
                 .push(CommandEffect::RefreshBorders);
         } else {
+            // Upstream always arranges after remove_node (window.c:243).
+            self.state
+                .pending_effects
+                .push(CommandEffect::Arrange { monitor, desktop });
             self.broadcast_report();
         }
         Some((monitor, desktop))
     }
+}
+
+fn timestamp_is_later(candidate: x::Timestamp, reference: x::Timestamp) -> bool {
+    candidate.wrapping_sub(reference).cast_signed() > 0
 }
 
 #[cfg(test)]
@@ -1066,6 +1188,40 @@ mod tests {
         assert_eq!(app.state.world.desktop(desktop).tree.focus, Some(third));
         assert!(app.state.pending_effects.iter().any(|effect| {
             matches!(effect, CommandEffect::Focus { node: Some(node), .. } if *node == third)
+        }));
+    }
+
+    #[test]
+    fn initial_focus_policy_honors_zero_stale_wraparound_and_startup_time() {
+        let (mut app, _, _) = app_with_desktop();
+        app.last_user_time = Some(100);
+        assert!(!app.initial_focus_allowed(&ClientInitial {
+            user_time: Some(0),
+            ..ClientInitial::default()
+        }));
+        assert!(!app.initial_focus_allowed(&ClientInitial {
+            user_time: Some(99),
+            ..ClientInitial::default()
+        }));
+        assert!(app.initial_focus_allowed(&ClientInitial {
+            user_time: Some(100),
+            ..ClientInitial::default()
+        }));
+        assert!(app.initial_focus_allowed(&ClientInitial {
+            user_time: Some(101),
+            ..ClientInitial::default()
+        }));
+
+        app.last_user_time = Some(u32::MAX - 1);
+        assert!(app.initial_focus_allowed(&ClientInitial {
+            user_time: Some(2),
+            ..ClientInitial::default()
+        }));
+        app.startup.ingest(1, true, b"new: ID=launch_TIME55\0");
+        app.last_user_time = Some(50);
+        assert!(app.initial_focus_allowed(&ClientInitial {
+            startup_id: Some("launch_TIME55".to_owned()),
+            ..ClientInitial::default()
         }));
     }
 

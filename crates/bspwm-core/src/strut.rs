@@ -36,6 +36,25 @@ pub fn parse_strut_partial(values: &[u32]) -> Option<StrutPartial> {
 }
 
 #[must_use]
+pub fn parse_strut(values: &[u32], screen_width: u16, screen_height: u16) -> Option<StrutPartial> {
+    let values: &[u32; 4] = values.get(..4)?.try_into().ok()?;
+    Some(StrutPartial {
+        left: values[0],
+        right: values[1],
+        top: values[2],
+        bottom: values[3],
+        left_start_y: 0,
+        left_end_y: u32::from(screen_height).saturating_sub(1),
+        right_start_y: 0,
+        right_end_y: u32::from(screen_height).saturating_sub(1),
+        top_start_x: 0,
+        top_end_x: u32::from(screen_width).saturating_sub(1),
+        bottom_start_x: 0,
+        bottom_end_x: u32::from(screen_width).saturating_sub(1),
+    })
+}
+
+#[must_use]
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 pub fn apply_strut_partial(
     padding: &mut Padding,
@@ -132,5 +151,27 @@ mod tests {
             strut,
         ));
         assert_eq!(padding.top, 10);
+    }
+
+    #[test]
+    fn legacy_struts_expand_to_full_screen_spans() {
+        assert_eq!(
+            parse_strut(&[1, 2, 3, 4], 200, 100),
+            Some(StrutPartial {
+                left: 1,
+                right: 2,
+                top: 3,
+                bottom: 4,
+                left_start_y: 0,
+                left_end_y: 99,
+                right_start_y: 0,
+                right_end_y: 99,
+                top_start_x: 0,
+                top_end_x: 199,
+                bottom_start_x: 0,
+                bottom_end_x: 199,
+            })
+        );
+        assert!(parse_strut(&[1, 2, 3], 200, 100).is_none());
     }
 }

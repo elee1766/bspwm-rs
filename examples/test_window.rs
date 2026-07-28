@@ -21,6 +21,7 @@ struct Options {
     take_focus: bool,
     input: Option<bool>,
     override_redirect: bool,
+    user_time: Option<u32>,
 }
 
 struct Atoms {
@@ -30,6 +31,7 @@ struct Atoms {
     wm_normal_hints: x::Atom,
     wm_size_hints: x::Atom,
     net_wm_strut_partial: x::Atom,
+    net_wm_user_time: x::Atom,
 }
 
 enum CommandResult {
@@ -91,6 +93,14 @@ fn parse_arguments() -> Result<(String, String, u32, Options), Box<dyn Error>> {
                 });
             }
             "--override-redirect" => options.override_redirect = true,
+            "--user-time" => {
+                options.user_time = Some(
+                    arguments
+                        .next()
+                        .ok_or("--user-time requires TIMESTAMP")?
+                        .parse()?,
+                );
+            }
             _ => return Err(format!("unknown argument '{argument}'").into()),
         }
     }
@@ -444,6 +454,7 @@ fn run_event_loop(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn Error>> {
     let (instance_name, class_name, color, options) = parse_arguments()?;
     let mut events = options
@@ -478,6 +489,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         wm_normal_hints: intern_atom(&connection, b"WM_NORMAL_HINTS")?,
         wm_size_hints: intern_atom(&connection, b"WM_SIZE_HINTS")?,
         net_wm_strut_partial: intern_atom(&connection, b"_NET_WM_STRUT_PARTIAL")?,
+        net_wm_user_time: intern_atom(&connection, b"_NET_WM_USER_TIME")?,
     };
     let wm_class_atom = intern_atom(&connection, b"WM_CLASS")?;
 
@@ -525,6 +537,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     if options.input.is_some() {
         change_wm_hints(&connection, window, options.input, false);
+    }
+    if let Some(user_time) = options.user_time {
+        connection.send_request(&x::ChangeProperty {
+            mode: x::PropMode::Replace,
+            window,
+            property: atoms.net_wm_user_time,
+            r#type: x::ATOM_CARDINAL,
+            data: &[user_time],
+        });
     }
     connection.send_request(&x::ChangeProperty {
         mode: x::PropMode::Replace,

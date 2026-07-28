@@ -121,6 +121,7 @@ impl CommandHandler<'_> {
                         .filter_map(|location| location.monitor)
                         .collect();
                     self.state.world.reorder_monitors(&requested);
+                    self.state.pending_effects.push(CommandEffect::SyncEwmh);
                     break;
                 }
                 WmCommand::AdoptOrphans => {

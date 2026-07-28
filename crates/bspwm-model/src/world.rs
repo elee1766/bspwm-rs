@@ -522,6 +522,13 @@ impl World {
         let second_desktop = self
             .node_desktop(second)
             .ok_or(StructuralError::NotAttached)?;
+        if first_desktop != second_desktop {
+            let first_sticky = self.tree.node(first).sticky;
+            let second_sticky = self.tree.node(second).sticky;
+            if first_sticky || second_sticky {
+                return Err(StructuralError::InvalidSwap);
+            }
+        }
         if first_desktop == second_desktop {
             let mut state = self.desktop(first_desktop).tree;
             self.tree.swap_within(&mut state, first, second)?;

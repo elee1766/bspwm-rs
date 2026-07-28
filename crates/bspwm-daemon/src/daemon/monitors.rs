@@ -66,6 +66,11 @@ impl DaemonApp {
         for (action, cookie) in actions.into_iter().zip(geometries) {
             let reply = x11.connection().wait_for_reply(cookie)?;
             let actual = Rectangle::from_x11(reply.x(), reply.y(), reply.width(), reply.height());
+            crate::ewmh::set_frame_extents(
+                x11,
+                x::Window::new(action.window),
+                action.border_width,
+            )?;
             if actual == action.rectangle {
                 Self::execute_action(
                     x11,

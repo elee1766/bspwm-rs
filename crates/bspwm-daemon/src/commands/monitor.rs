@@ -203,6 +203,7 @@ impl CommandHandler<'_> {
                         for desktop in self.state.world.monitor(monitor).desktops.clone() {
                             self.arrange_effect(monitor, desktop);
                         }
+                        self.state.pending_effects.push(CommandEffect::SyncEwmh);
                     }
                 }
                 MonitorCommand::Remove { terminal: () } => {

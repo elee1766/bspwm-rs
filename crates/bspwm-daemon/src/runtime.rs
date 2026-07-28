@@ -47,10 +47,11 @@ pub const CONFIG_NAME: &str = "bspwmrc";
 pub const DEFAULT_IDLE_INTERVAL: Duration = Duration::from_millis(10);
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-const ROOT_EVENT_MASK: x::EventMask = x::EventMask::SUBSTRUCTURE_REDIRECT
+pub(crate) const ROOT_EVENT_MASK: x::EventMask = x::EventMask::SUBSTRUCTURE_REDIRECT
     .union(x::EventMask::SUBSTRUCTURE_NOTIFY)
     .union(x::EventMask::STRUCTURE_NOTIFY)
     .union(x::EventMask::BUTTON_PRESS)
+    .union(x::EventMask::PROPERTY_CHANGE)
     .union(x::EventMask::FOCUS_CHANGE);
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -949,11 +950,13 @@ fn create_meta_window(x11: &X11) -> Result<x::Window, RuntimeError> {
 }
 
 fn setup_ewmh(x11: &X11, meta_window: x::Window, state: &DaemonState) -> Result<(), RuntimeError> {
-    ewmh::set_supported(x11)?;
+    ewmh::set_supported(x11, false)?;
     ewmh::set_supporting(x11, meta_window, WM_NAME)?;
     ewmh::update_number_of_desktops(x11, &state.world)?;
     ewmh::update_desktop_names(x11, &state.world)?;
+    ewmh::update_desktop_geometry(x11)?;
     ewmh::update_desktop_viewports(x11, &state.world)?;
+    ewmh::update_workareas(x11, &state.world)?;
     ewmh::update_current_desktop(x11, &state.world)?;
     ewmh::update_client_desktops(x11, &state.world)?;
     ewmh::update_client_list(x11, &state.world)?;

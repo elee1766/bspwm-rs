@@ -97,6 +97,10 @@ impl DaemonApp {
         // `window -> location` entry survives it.
         self.invalidate_window_index();
         self.state.apply_restored(restored);
+        self.last_user_time = None;
+        self.user_time_windows.clear();
+        self.sync_request_clients.clear();
+        self.pending_ewmh_pings.clear();
         for id in self.world().monitor_order().to_vec() {
             let value = self.world().monitor(id);
             let root = monitor::create_monitor_root(
@@ -108,6 +112,11 @@ impl DaemonApp {
             self.world_mut().monitor_mut(id).root_id = Some(root);
         }
         let clients = self.all_client_nodes();
+        let focused = self
+            .world()
+            .focused_monitor
+            .and_then(|monitor| self.world().monitor(monitor).active_desktop)
+            .and_then(|desktop| self.world().desktop(desktop).tree.focus);
         for node in clients.iter().copied() {
             let window_id = self.xid(node);
             let window = x::Window::new(window_id);
@@ -121,13 +130,60 @@ impl DaemonApp {
                 input: None,
                 urgent: false,
             });
+            let direct_user_time = window::get_property::<u32>(
+                x11,
+                window,
+                x11.atoms().net_wm_user_time,
+                x::ATOM_CARDINAL,
+            )
+            .unwrap_or_default()
+            .first()
+            .copied();
+            let user_time_window = window::get_property::<u32>(
+                x11,
+                window,
+                x11.atoms().net_wm_user_time_window,
+                x::ATOM_WINDOW,
+            )
+            .unwrap_or_default()
+            .first()
+            .copied()
+            .filter(|auxiliary| {
+                *auxiliary != x::WINDOW_NONE.resource_id() && *auxiliary != window_id
+            });
+            let user_time = user_time_window
+                .and_then(|auxiliary| {
+                    window::get_property::<u32>(
+                        x11,
+                        x::Window::new(auxiliary),
+                        x11.atoms().net_wm_user_time,
+                        x::ATOM_CARDINAL,
+                    )
+                    .ok()
+                    .and_then(|values| values.first().copied())
+                })
+                .or(direct_user_time);
+            if let Some(auxiliary) = user_time_window
+                && window::listen_for_property_changes(x11, x::Window::new(auxiliary)).is_ok()
+            {
+                self.user_time_windows.insert(auxiliary, window_id);
+            }
+            if focused == Some(node)
+                && let Some(user_time) = user_time
+            {
+                self.note_user_time(user_time);
+            }
             let client = self.client_mut(node);
             client.icccm.input_hint = hints.input.unwrap_or(true);
             client.icccm.take_focus = protocols.contains(&x11.atoms().wm_take_focus.resource_id());
             client.icccm.delete_window =
                 protocols.contains(&x11.atoms().wm_delete_window.resource_id());
+            client.icccm.ping = protocols.contains(&x11.atoms().net_wm_ping.resource_id());
             client.size_hints = window::normal_hints(x11, window).unwrap_or_default();
             client.wm_flags = ewmh::wm_flags_from_ids(&states, x11.atoms());
+            if let Some(counter) = window::sync_request_counter(x11, window) {
+                self.sync_request_clients.insert(window_id, counter);
+            }
             Self::execute_action(
                 x11,
                 XAction::SetClientEventMask {

@@ -227,14 +227,14 @@ impl CommandHandler<'_> {
         let Some(root) = self.state.world.desktop(desktop).tree.root else {
             return;
         };
-        let target_layer = self
+        let target_level = self
             .state
             .world
             .tree
             .node(target)
             .client
             .as_ref()
-            .map(|client| client.layer);
+            .map(crate::stack::stack_level);
         let mut changed = false;
         // `set_node_state` never relinks the tree, so the leaf chain is stable.
         let leaves: Vec<_> = self.state.world.tree.leaves(root).collect();
@@ -250,13 +250,11 @@ impl CommandHandler<'_> {
                 .client
                 .as_ref()
                 .and_then(|client| {
-                    let rank = |layer| match layer {
-                        crate::types::StackLayer::Below => 0,
-                        crate::types::StackLayer::Normal => 1,
-                        crate::types::StackLayer::Above => 2,
-                    };
+                    // Upstream uses stack_cmp (tree.c:1995) which compares the
+                    // full 3*layer+state level, not just the layer.
                     (client.state == ClientState::Fullscreen
-                        && target_layer.is_some_and(|layer| rank(layer) <= rank(client.layer)))
+                        && target_level
+                            .is_some_and(|level| level < crate::stack::stack_level(client)))
                     .then_some(client.last_state)
                 });
             if let Some(state) = replacement {

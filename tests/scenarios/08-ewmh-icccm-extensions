@@ -30,6 +30,12 @@ root_property_contains _NET_SUPPORTED _NET_CLIENT_LIST \
 	|| fail "_NET_SUPPORTED omits _NET_CLIENT_LIST"
 root_property_contains _NET_SUPPORTED _NET_WM_STATE_FULLSCREEN \
 	|| fail "_NET_SUPPORTED omits _NET_WM_STATE_FULLSCREEN"
+for atom in _NET_WORKAREA _NET_DESKTOP_GEOMETRY _NET_WM_USER_TIME _NET_WM_USER_TIME_WINDOW _NET_WM_MOVERESIZE _NET_MOVERESIZE_WINDOW _NET_REQUEST_FRAME_EXTENTS _NET_FRAME_EXTENTS; do
+	root_property_contains _NET_SUPPORTED "$atom" || fail "_NET_SUPPORTED omits $atom"
+done
+root_property_contains _NET_DESKTOP_GEOMETRY '= ' \
+	|| fail "root lacks _NET_DESKTOP_GEOMETRY"
+root_property_contains _NET_WORKAREA '= ' || fail "root lacks _NET_WORKAREA"
 wm_check=$(xprop -root _NET_SUPPORTING_WM_CHECK | awk '{print $NF}')
 [ -n "$wm_check" ] || fail "root lacks _NET_SUPPORTING_WM_CHECK"
 xwininfo -id "$wm_check" >/dev/null 2>&1 || fail "supporting WM check window does not exist"
@@ -65,6 +71,22 @@ window_property_contains "$first" WM_STATE 'window state: Normal' \
 	|| fail "managed client does not have normal WM_STATE"
 window_property_contains "$first" _NET_WM_DESKTOP '= 0' \
 	|| fail "first client has the wrong _NET_WM_DESKTOP"
+window_property_contains "$first" _NET_FRAME_EXTENTS '= 1, 1, 1, 1' \
+	|| fail "first client has incorrect _NET_FRAME_EXTENTS"
+
+no_focus=$(add_controlled_window no-focus-time no-focus-time ScenarioEwmh --user-time 0)
+assert_eq "$first" "$($BSPC query -N -n focused)" "zero user time prevented automatic focus"
+close_test_window "$no_focus"
+
+$BSPC node "$first" --state floating
+"$X_MESSAGE" moveresize "$first" 23 24 333 222
+poll_until 50 0.02 window_has_full_geometry "$first" 23 24 333 222 \
+	|| fail "_NET_MOVERESIZE_WINDOW did not configure floating client"
+$BSPC node "$first" --state tiled
+tiled_before=$($BSPC query -T -n "$first" | jq -c '.client.tiledRectangle')
+"$X_MESSAGE" moveresize "$first" 40 41 200 150
+tiled_after=$($BSPC query -T -n "$first" | jq -c '.client.tiledRectangle')
+assert_eq "$tiled_before" "$tiled_after" "tiled client ignored _NET_MOVERESIZE_WINDOW"
 
 "$X_MESSAGE" desktop 1
 poll_until 50 0.02 root_property_contains _NET_CURRENT_DESKTOP '= 1' \

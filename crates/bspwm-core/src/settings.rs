@@ -23,6 +23,7 @@ pub struct Settings {
     pub directional_focus_tightness: Tightness,
     pub pointer_modifier: PointerModifier,
     pub pointer_motion_interval: u32,
+    pub pointer_resize_sync: bool,
     pub pointer_actions: [PointerAction; 3],
     pub mapping_events_count: i8,
     pub presel_feedback: bool,
@@ -35,6 +36,8 @@ pub struct Settings {
     pub pointer_follows_monitor: bool,
     pub click_to_focus: ButtonIndex,
     pub swallow_first_click: bool,
+    pub enable_ewmh_ping: bool,
+    pub enable_ewmh_allowed_actions: bool,
     pub ignore_ewmh_focus: bool,
     pub ignore_ewmh_struts: bool,
     pub ignore_ewmh_fullscreen: StateTransitions,
@@ -65,6 +68,7 @@ impl Default for Settings {
             directional_focus_tightness: Tightness::High,
             pointer_modifier: PointerModifier::Mod4,
             pointer_motion_interval: 17,
+            pointer_resize_sync: false,
             pointer_actions: [
                 PointerAction::Move,
                 PointerAction::ResizeSide,
@@ -81,6 +85,8 @@ impl Default for Settings {
             pointer_follows_monitor: false,
             click_to_focus: ButtonIndex::Button1,
             swallow_first_click: false,
+            enable_ewmh_ping: false,
+            enable_ewmh_allowed_actions: false,
             ignore_ewmh_focus: false,
             ignore_ewmh_struts: false,
             ignore_ewmh_fullscreen: StateTransitions::NONE,
@@ -106,7 +112,10 @@ mod tests {
         assert!((settings.split_ratio - 0.5).abs() < f64::EPSILON);
         assert_eq!(settings.pointer_modifier, PointerModifier::Mod4);
         assert_eq!(settings.pointer_motion_interval, 17);
+        assert!(!settings.pointer_resize_sync);
         assert_eq!(settings.click_to_focus, ButtonIndex::Button1);
+        assert!(!settings.enable_ewmh_ping);
+        assert!(!settings.enable_ewmh_allowed_actions);
         assert_eq!(settings.ignore_ewmh_fullscreen, StateTransitions::NONE);
     }
 }

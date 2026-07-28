@@ -397,6 +397,7 @@ fn restore_client(
     client.shown = dto.shown;
     client.tiled_rectangle = dto.tiled_rectangle;
     client.floating_rectangle = dto.floating_rectangle;
+    client.transient_for = dto.transient_for.filter(|id| *id != 0);
     Ok(client)
 }
 

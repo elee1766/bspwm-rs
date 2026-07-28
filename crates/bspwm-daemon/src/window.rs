@@ -6,7 +6,7 @@
     clippy::similar_names
 )]
 
-use xcb::{Xid, shape, x};
+use xcb::{Xid, XidNew, shape, sync, x};
 
 use crate::rule::{BuiltinRuleProperties, BuiltinWindowState, BuiltinWindowType, WindowProperties};
 use crate::tree::{IcccmProps, SizeHints};
@@ -34,6 +34,12 @@ pub struct RuleWindowProperties {
     pub icccm: IcccmProps,
     pub urgent: bool,
     pub wm_flags: WmFlags,
+    pub user_time: Option<x::Timestamp>,
+    pub user_time_window: Option<u32>,
+    pub startup_id: Option<String>,
+    pub sync_request_counter: Option<sync::Counter>,
+    /// The exact `WM_TRANSIENT_FOR` parent XID, if set and valid.
+    pub transient_for: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,6 +88,7 @@ fn geometry_from_reply(reply: &x::GetGeometryReply) -> WindowGeometry {
 /// per property.  Replies are awaited in exactly the order the requests were
 /// issued, so a client that dies mid-sequence still surfaces the same error the
 /// serial version returned.
+#[allow(clippy::too_many_lines)]
 pub fn rule_properties(x11: &X11, window: x::Window) -> xcb::Result<RuleWindowProperties> {
     let atoms = x11.atoms();
     let attributes_cookie = x11.send(&x::GetWindowAttributes { window });
@@ -95,6 +102,16 @@ pub fn rule_properties(x11: &X11, window: x::Window) -> xcb::Result<RuleWindowPr
     let transient_cookie = send_get_property(x11, window, atoms.wm_transient_for, x::ATOM_WINDOW);
     let normal_hints_cookie =
         send_get_property(x11, window, atoms.wm_normal_hints, atoms.wm_size_hints);
+    let user_time_cookie = send_get_property(x11, window, atoms.net_wm_user_time, x::ATOM_CARDINAL);
+    let user_time_window_cookie =
+        send_get_property(x11, window, atoms.net_wm_user_time_window, x::ATOM_WINDOW);
+    let startup_id_cookie = send_get_property(x11, window, atoms.net_startup_id, atoms.utf8_string);
+    let sync_counter_cookie = send_get_property(
+        x11,
+        window,
+        atoms.net_wm_sync_request_counter,
+        x::ATOM_CARDINAL,
+    );
     let geometry_cookie = x11.send(&x::GetGeometry {
         drawable: x::Drawable::Window(window),
     });
@@ -112,6 +129,11 @@ pub fn rule_properties(x11: &X11, window: x::Window) -> xcb::Result<RuleWindowPr
     let wm_hint_values = wait_property::<u32>(connection, wm_hints_cookie, x::ATOM_WM_HINTS);
     let transient_values = wait_property::<u32>(connection, transient_cookie, x::ATOM_WINDOW);
     let hints = wait_property::<u32>(connection, normal_hints_cookie, atoms.wm_size_hints);
+    let direct_user_time = wait_property::<u32>(connection, user_time_cookie, x::ATOM_CARDINAL);
+    let user_time_window =
+        wait_property::<u32>(connection, user_time_window_cookie, x::ATOM_WINDOW);
+    let startup_id = wait_property::<u8>(connection, startup_id_cookie, atoms.utf8_string);
+    let sync_counter = wait_property::<u32>(connection, sync_counter_cookie, x::ATOM_CARDINAL);
     let geometry = connection
         .wait_for_reply(geometry_cookie)
         .map(|reply| geometry_from_reply(&reply));
@@ -133,11 +155,40 @@ pub fn rule_properties(x11: &X11, window: x::Window) -> xcb::Result<RuleWindowPr
     let protocols = protocols?;
     let wm_hints = parse_wm_hints(&wm_hint_values?);
     let wm_flags = crate::ewmh::wm_flags_from_ids(&window_states, atoms);
-    let transient = transient_values?
+    let transient_for = transient_values?
         .first()
-        .is_some_and(|transient| *transient != x::WINDOW_NONE.resource_id());
+        .copied()
+        .filter(|id| *id != x::WINDOW_NONE.resource_id())
+        .filter(|id| *id != window.resource_id());
+    let transient = transient_for.is_some();
     let size_hints = parse_size_hints(&hints?);
     let geometry = geometry?;
+    let direct_user_time = direct_user_time?.first().copied();
+    let user_time_window = user_time_window?
+        .first()
+        .copied()
+        .filter(|value| *value != x::WINDOW_NONE.resource_id());
+    let user_time = user_time_window
+        .filter(|value| *value != window.resource_id())
+        .and_then(|value| {
+            get_property::<u32>(
+                x11,
+                x::Window::new(value),
+                atoms.net_wm_user_time,
+                x::ATOM_CARDINAL,
+            )
+            .ok()
+            .and_then(|values| values.first().copied())
+        })
+        .or(direct_user_time);
+    let startup_id = startup_id?;
+    let startup_id = (!startup_id.is_empty()).then(|| lossy(trim_nul(&startup_id)));
+    let sync_request_counter = protocols
+        .contains(&atoms.net_wm_sync_request.resource_id())
+        .then(|| sync_counter.ok()?.first().copied())
+        .flatten()
+        .filter(|counter| *counter != 0)
+        .map(sync::Counter::new);
 
     Ok(RuleWindowProperties {
         override_redirect: attributes.override_redirect(),
@@ -154,9 +205,43 @@ pub fn rule_properties(x11: &X11, window: x::Window) -> xcb::Result<RuleWindowPr
             input_hint: wm_hints.input.unwrap_or(true),
             take_focus: protocols.contains(&atoms.wm_take_focus.resource_id()),
             delete_window: protocols.contains(&atoms.wm_delete_window.resource_id()),
+            ping: protocols.contains(&atoms.net_wm_ping.resource_id()),
         },
         urgent: wm_hints.urgent || wm_flags.contains(WmFlags::DEMANDS_ATTENTION),
         wm_flags,
+        user_time,
+        user_time_window,
+        startup_id,
+        sync_request_counter,
+        transient_for,
+    })
+}
+
+/// Reads the basic frame-sync counter only when the client advertises the protocol.
+pub fn sync_request_counter(x11: &X11, window: x::Window) -> Option<sync::Counter> {
+    let protocols =
+        get_property::<u32>(x11, window, x11.atoms().wm_protocols, x::ATOM_ATOM).ok()?;
+    if !protocols.contains(&x11.atoms().net_wm_sync_request.resource_id()) {
+        return None;
+    }
+    get_property::<u32>(
+        x11,
+        window,
+        x11.atoms().net_wm_sync_request_counter,
+        x::ATOM_CARDINAL,
+    )
+    .ok()?
+    .first()
+    .copied()
+    .filter(|counter| *counter != 0)
+    .map(sync::Counter::new)
+}
+
+/// Selects property notifications from a client-owned auxiliary window.
+pub fn listen_for_property_changes(x11: &X11, window: x::Window) -> xcb::ProtocolResult<()> {
+    x11.send_and_check_request(&x::ChangeWindowAttributes {
+        window,
+        value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
     })
 }
 
@@ -223,6 +308,36 @@ pub fn get_property<P: x::PropEl + Clone>(
 ) -> xcb::Result<Vec<P>> {
     let cookie = send_get_property(x11, window, property, property_type);
     wait_property(x11.connection(), cookie, property_type)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CardinalProperty {
+    Absent,
+    Invalid,
+    Values(Vec<u32>),
+}
+
+/// Reads a CARDINAL property while preserving the distinction between absent and invalid.
+pub fn get_cardinal_property(
+    x11: &X11,
+    window: x::Window,
+    property: x::Atom,
+) -> xcb::Result<CardinalProperty> {
+    let reply = x11.request(&x::GetProperty {
+        delete: false,
+        window,
+        property,
+        r#type: x::ATOM_ANY,
+        long_offset: 0,
+        long_length: u32::MAX,
+    })?;
+    if reply.r#type() == x::ATOM_NONE {
+        return Ok(CardinalProperty::Absent);
+    }
+    if reply.r#type() != x::ATOM_CARDINAL || reply.format() != 32 {
+        return Ok(CardinalProperty::Invalid);
+    }
+    Ok(CardinalProperty::Values(reply.value::<u32>().to_vec()))
 }
 
 /// Queues a whole-property read without awaiting its reply, so callers can pipeline.
@@ -360,6 +475,19 @@ pub fn move_resize(x11: &X11, window: x::Window, rectangle: Rectangle) -> xcb::P
     )
 }
 
+/// Queues an interactive geometry update without forcing a round trip.
+pub fn queue_move_resize(x11: &X11, window: x::Window, rectangle: Rectangle) {
+    x11.send(&x::ConfigureWindow {
+        window,
+        value_list: &[
+            x::ConfigWindow::X(rectangle.x),
+            x::ConfigWindow::Y(rectangle.y),
+            x::ConfigWindow::Width(u32::try_from(rectangle.width).unwrap_or(0)),
+            x::ConfigWindow::Height(u32::try_from(rectangle.height).unwrap_or(0)),
+        ],
+    });
+}
+
 pub fn map(x11: &X11, window: x::Window) -> xcb::ProtocolResult<()> {
     x11.send_and_check_request(&x::MapWindow { window })
 }
@@ -370,12 +498,7 @@ pub fn unmap(x11: &X11, window: x::Window) -> xcb::ProtocolResult<()> {
 
 /// Maps or unmaps without letting the WM consume its own `UnmapNotify`.
 pub fn set_visibility(x11: &X11, window: x::Window, visible: bool) -> xcb::ProtocolResult<()> {
-    const ROOT_MASK: x::EventMask = x::EventMask::SUBSTRUCTURE_REDIRECT
-        .union(x::EventMask::SUBSTRUCTURE_NOTIFY)
-        .union(x::EventMask::STRUCTURE_NOTIFY)
-        .union(x::EventMask::BUTTON_PRESS)
-        .union(x::EventMask::FOCUS_CHANGE);
-    let quiet_mask = ROOT_MASK.difference(x::EventMask::SUBSTRUCTURE_NOTIFY);
+    let quiet_mask = crate::runtime::ROOT_EVENT_MASK.difference(x::EventMask::SUBSTRUCTURE_NOTIFY);
     x11.send_and_check_request(&x::ChangeWindowAttributes {
         window: x11.root(),
         value_list: &[x::Cw::EventMask(quiet_mask)],
@@ -396,7 +519,7 @@ pub fn set_visibility(x11: &X11, window: x::Window, visible: bool) -> xcb::Proto
     };
     let restore = x11.send_and_check_request(&x::ChangeWindowAttributes {
         window: x11.root(),
-        value_list: &[x::Cw::EventMask(ROOT_MASK)],
+        value_list: &[x::Cw::EventMask(crate::runtime::ROOT_EVENT_MASK)],
     });
     request.and(restore)
 }
@@ -571,6 +694,10 @@ pub fn set_property<P: x::PropEl>(
     })
 }
 
+pub fn delete_property(x11: &X11, window: x::Window, property: x::Atom) -> xcb::ProtocolResult<()> {
+    x11.send_and_check_request(&x::DeleteProperty { window, property })
+}
+
 /// Returns the EWMH desktop index when `_NET_WM_DESKTOP` is present.
 pub fn wm_desktop(x11: &X11, window: x::Window) -> xcb::Result<Option<u32>> {
     Ok(
@@ -596,6 +723,44 @@ pub fn send_client_message(
         event_mask,
         event: &event,
     })
+}
+
+/// Queues the basic frame synchronization request that precedes a resize.
+pub fn queue_sync_request(x11: &X11, window: x::Window, timestamp: x::Timestamp, value: i64) {
+    let event = x::ClientMessageEvent::new(
+        window,
+        x11.atoms().wm_protocols,
+        x::ClientMessageData::Data32([
+            x11.atoms().net_wm_sync_request.resource_id(),
+            timestamp,
+            value as u32,
+            (value >> 32) as u32,
+            0,
+        ]),
+    );
+    x11.send(&x::SendEvent {
+        propagate: false,
+        destination: x::SendEventDest::Window(window),
+        event_mask: x::EventMask::NO_EVENT,
+        event: &event,
+    });
+}
+
+pub fn send_ping(x11: &X11, window: x::Window, timestamp: x::Timestamp) -> xcb::ProtocolResult<()> {
+    send_client_message(
+        x11,
+        window,
+        window,
+        x11.atoms().wm_protocols,
+        [
+            x11.atoms().net_wm_ping.resource_id(),
+            timestamp,
+            window.resource_id(),
+            0,
+            0,
+        ],
+        x::EventMask::NO_EVENT,
+    )
 }
 
 pub fn close_cached(

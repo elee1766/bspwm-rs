@@ -1,30 +1,42 @@
 #![allow(clippy::cast_sign_loss)]
 
 use crate::query::Coordinates;
+use crate::settings::Settings;
 use crate::stack::StackingOrder;
 use crate::tree::NodeId;
-use crate::types::{MAXLEN, WmFlags};
+use crate::types::{ClientState, MAXLEN, StateTransitions, WmFlags};
 use crate::window::set_property;
 use crate::world::{DesktopId, World};
-use crate::x11::{Atoms, X11};
-pub use bspwm_core::strut::{StrutPartial, apply_strut_partial, parse_strut_partial};
+use crate::x11::{Atoms, ScreenGeometry, X11};
+pub use bspwm_core::strut::{StrutPartial, apply_strut_partial, parse_strut, parse_strut_partial};
 use xcb::{Xid, XidNew, x};
 
 /// Returns the atoms advertised by upstream bspwm, in canonical order.
 #[must_use]
-pub fn supported_atoms(atoms: &Atoms) -> Vec<x::Atom> {
-    vec![
+pub fn supported_atoms(atoms: &Atoms, allowed_actions: bool) -> Vec<x::Atom> {
+    let mut result = vec![
         atoms.net_supported,
         atoms.net_supporting_wm_check,
         atoms.net_desktop_names,
+        atoms.net_desktop_geometry,
         atoms.net_desktop_viewport,
+        atoms.net_workarea,
         atoms.net_number_of_desktops,
         atoms.net_current_desktop,
         atoms.net_client_list,
         atoms.net_active_window,
         atoms.net_close_window,
+        atoms.net_moveresize_window,
+        atoms.net_wm_moveresize,
+        atoms.net_request_frame_extents,
+        atoms.net_frame_extents,
+        atoms.net_wm_sync_request,
+        atoms.net_wm_sync_request_counter,
         atoms.net_wm_strut_partial,
+        atoms.net_wm_strut,
         atoms.net_wm_desktop,
+        atoms.net_wm_user_time,
+        atoms.net_wm_user_time_window,
         atoms.net_wm_state,
         atoms.net_wm_state_hidden,
         atoms.net_wm_state_fullscreen,
@@ -39,15 +51,31 @@ pub fn supported_atoms(atoms: &Atoms) -> Vec<x::Atom> {
         atoms.net_wm_window_type_dialog,
         atoms.net_wm_window_type_utility,
         atoms.net_wm_window_type_toolbar,
-    ]
+        atoms.net_wm_ping,
+    ];
+    if allowed_actions {
+        result.extend([
+            atoms.net_wm_allowed_actions,
+            atoms.net_wm_action_move,
+            atoms.net_wm_action_resize,
+            atoms.net_wm_action_minimize,
+            atoms.net_wm_action_stick,
+            atoms.net_wm_action_fullscreen,
+            atoms.net_wm_action_change_desktop,
+            atoms.net_wm_action_close,
+            atoms.net_wm_action_above,
+            atoms.net_wm_action_below,
+        ]);
+    }
+    result
 }
 
 /// Writes `_NET_SUPPORTED` on the root window.
 ///
 /// # Errors
 /// Returns an X protocol error if the checked property request fails.
-pub fn set_supported(x11: &X11) -> xcb::ProtocolResult<()> {
-    let values = supported_atoms(x11.atoms());
+pub fn set_supported(x11: &X11, allowed_actions: bool) -> xcb::ProtocolResult<()> {
+    let values = supported_atoms(x11.atoms(), allowed_actions);
     set_property(
         x11,
         x11.root(),
@@ -198,6 +226,26 @@ pub fn update_desktop_names(x11: &X11, world: &World) -> xcb::ProtocolResult<()>
     )
 }
 
+/// Builds `_NET_DESKTOP_GEOMETRY` for a non-scrolling desktop model.
+#[must_use]
+pub const fn desktop_geometry_payload(screen: ScreenGeometry) -> [u32; 2] {
+    [screen.width as u32, screen.height as u32]
+}
+
+/// Writes the common desktop geometry from the live root dimensions.
+///
+/// # Errors
+/// Returns an X protocol error if the checked property request fails.
+pub fn update_desktop_geometry(x11: &X11) -> xcb::ProtocolResult<()> {
+    set_property(
+        x11,
+        x11.root(),
+        x11.atoms().net_desktop_geometry,
+        x::ATOM_CARDINAL,
+        &desktop_geometry_payload(x11.geometry()),
+    )
+}
+
 /// Builds flat x/y coordinate pairs for `_NET_DESKTOP_VIEWPORT`.
 #[must_use]
 #[allow(clippy::cast_sign_loss)]
@@ -223,6 +271,67 @@ pub fn update_desktop_viewports(x11: &X11, world: &World) -> xcb::ProtocolResult
         x11.atoms().net_desktop_viewport,
         x::ATOM_CARDINAL,
         &coordinates,
+    )
+}
+
+/// Builds viewport-relative usable rectangles for `_NET_WORKAREA`.
+#[must_use]
+pub fn workareas_payload(world: &World) -> Vec<u32> {
+    let mut workareas = Vec::new();
+    for (monitor, desktop) in world.desktops() {
+        let monitor = world.monitor(monitor);
+        let desktop = world.desktop(desktop);
+        let left = monitor
+            .padding
+            .left
+            .saturating_add(desktop.padding.left)
+            .max(0);
+        let right = monitor
+            .padding
+            .right
+            .saturating_add(desktop.padding.right)
+            .max(0);
+        let top = monitor
+            .padding
+            .top
+            .saturating_add(desktop.padding.top)
+            .max(0);
+        let bottom = monitor
+            .padding
+            .bottom
+            .saturating_add(desktop.padding.bottom)
+            .max(0);
+        workareas.extend([
+            left as u32,
+            top as u32,
+            monitor
+                .rectangle
+                .width
+                .saturating_sub(left)
+                .saturating_sub(right)
+                .max(0) as u32,
+            monitor
+                .rectangle
+                .height
+                .saturating_sub(top)
+                .saturating_sub(bottom)
+                .max(0) as u32,
+        ]);
+    }
+    workareas
+}
+
+/// Writes one usable rectangle per desktop.
+///
+/// # Errors
+/// Returns an X protocol error if the checked property request fails.
+pub fn update_workareas(x11: &X11, world: &World) -> xcb::ProtocolResult<()> {
+    set_property(
+        x11,
+        x11.root(),
+        x11.atoms().net_workarea,
+        x::ATOM_CARDINAL,
+        &workareas_payload(world),
     )
 }
 
@@ -263,6 +372,24 @@ pub fn set_client_desktop(x11: &X11, window: x::Window, index: u32) -> xcb::Prot
         x11.atoms().net_wm_desktop,
         x::ATOM_CARDINAL,
         &[index],
+    )
+}
+
+/// Publishes the symmetric native X border as EWMH frame extents.
+///
+/// # Errors
+/// Returns an X protocol error if the checked property request fails.
+pub fn set_frame_extents(
+    x11: &X11,
+    window: x::Window,
+    border_width: u32,
+) -> xcb::ProtocolResult<()> {
+    set_property(
+        x11,
+        window,
+        x11.atoms().net_frame_extents,
+        x::ATOM_CARDINAL,
+        &[border_width; 4],
     )
 }
 
@@ -368,6 +495,60 @@ pub fn set_wm_state(x11: &X11, window: x::Window, states: &[x::Atom]) -> xcb::Pr
 }
 
 #[must_use]
+pub fn allowed_action_atoms(
+    world: &World,
+    node: NodeId,
+    settings: &Settings,
+    atoms: &Atoms,
+) -> Vec<x::Atom> {
+    let value = world.tree.node(node);
+    let Some(client) = value.client.as_ref() else {
+        return Vec::new();
+    };
+    let mut actions = vec![
+        atoms.net_wm_action_minimize,
+        atoms.net_wm_action_stick,
+        atoms.net_wm_action_close,
+        atoms.net_wm_action_above,
+        atoms.net_wm_action_below,
+    ];
+    if client.state == ClientState::Floating {
+        actions.push(atoms.net_wm_action_move);
+        actions.push(atoms.net_wm_action_resize);
+    }
+    let ignored = if client.state == ClientState::Fullscreen {
+        StateTransitions::EXIT
+    } else {
+        StateTransitions::ENTER
+    };
+    if !settings.ignore_ewmh_fullscreen.contains(ignored) {
+        actions.push(atoms.net_wm_action_fullscreen);
+    }
+    if world.desktops().count() > 1 {
+        actions.push(atoms.net_wm_action_change_desktop);
+    }
+    actions
+}
+
+/// Replaces the operations advertised for one managed client.
+///
+/// # Errors
+/// Returns an X protocol error if the property cannot be replaced.
+pub fn set_allowed_actions(
+    x11: &X11,
+    window: x::Window,
+    actions: &[x::Atom],
+) -> xcb::ProtocolResult<()> {
+    set_property(
+        x11,
+        window,
+        x11.atoms().net_wm_allowed_actions,
+        x::ATOM_ATOM,
+        actions,
+    )
+}
+
+#[must_use]
 pub fn wm_flags_from_ids(states: &[u32], atoms: &Atoms) -> WmFlags {
     wm_flag_atoms(atoms)
         .iter()
@@ -413,13 +594,21 @@ fn wm_flag_atoms(atoms: &Atoms) -> [(x::Atom, WmFlags); 12] {
 /// # Errors
 /// Returns a connection or protocol error if the property cannot be retrieved.
 pub fn get_strut_partial(x11: &X11, window: x::Window) -> xcb::Result<Option<StrutPartial>> {
-    crate::window::get_property::<u32>(
-        x11,
-        window,
-        x11.atoms().net_wm_strut_partial,
-        x::ATOM_CARDINAL,
-    )
-    .map(|values| parse_strut_partial(&values))
+    use crate::window::CardinalProperty;
+
+    match crate::window::get_cardinal_property(x11, window, x11.atoms().net_wm_strut_partial)? {
+        CardinalProperty::Values(values) => Ok(parse_strut_partial(&values)),
+        CardinalProperty::Invalid => Ok(None),
+        CardinalProperty::Absent => {
+            let geometry = x11.geometry();
+            match crate::window::get_cardinal_property(x11, window, x11.atoms().net_wm_strut)? {
+                CardinalProperty::Values(values) => {
+                    Ok(parse_strut(&values, geometry.width, geometry.height))
+                }
+                CardinalProperty::Absent | CardinalProperty::Invalid => Ok(None),
+            }
+        }
+    }
 }
 
 fn client_leaves(world: &World, root: NodeId) -> impl Iterator<Item = NodeId> + '_ {
@@ -434,7 +623,7 @@ mod tests {
     use super::*;
     use crate::settings::Settings;
     use crate::tree::Client;
-    use crate::types::Rectangle;
+    use crate::types::{Padding, Rectangle};
     use crate::world::MonitorId;
     use xcb::Xid;
 
@@ -489,6 +678,31 @@ mod tests {
     }
 
     #[test]
+    fn desktop_geometry_and_workareas_use_screen_size_padding_and_desktop_order() {
+        assert_eq!(
+            desktop_geometry_payload(ScreenGeometry::root(5120, 1440)),
+            [5120, 1440]
+        );
+        let (mut world, [left, _], [one, _, _], _) = sample_world();
+        world.monitor_mut(left).padding = Padding {
+            top: 5,
+            right: 0,
+            bottom: 0,
+            left: 10,
+        };
+        world.desktop_mut(one).padding = Padding {
+            top: 0,
+            right: 20,
+            bottom: 10,
+            left: 0,
+        };
+        assert_eq!(
+            workareas_payload(&world),
+            [10, 5, 170, 85, 10, 5, 190, 95, 0, 0, 100, 80]
+        );
+    }
+
+    #[test]
     fn absent_desktop_index_and_empty_names_match_upstream_fallbacks() {
         let settings = Settings::default();
         let mut world = World::default();
@@ -496,6 +710,7 @@ mod tests {
         assert_eq!(desktop_index(&world, detached), 0);
         assert!(desktop_names_payload(&world).is_empty());
         assert!(desktop_viewports_payload(&world).is_empty());
+        assert!(workareas_payload(&world).is_empty());
     }
 
     #[test]
@@ -520,7 +735,7 @@ mod tests {
     fn writes_root_properties_on_live_display() {
         let x11 = X11::connect(None).expect("connect to DISPLAY");
         let world = World::default();
-        set_supported(&x11).expect("set _NET_SUPPORTED");
+        set_supported(&x11, false).expect("set _NET_SUPPORTED");
         update_number_of_desktops(&x11, &world).expect("set desktop count");
         x11.flush().expect("flush requests");
     }

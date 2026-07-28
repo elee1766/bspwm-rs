@@ -216,11 +216,32 @@ pub enum EwmhClientMessage {
     },
     ActiveWindow {
         source: u32,
+        timestamp: x::Timestamp,
+        current_active: u32,
     },
     WmDesktop {
         desktop: u32,
     },
-    CloseWindow,
+    CloseWindow {
+        timestamp: x::Timestamp,
+    },
+    MoveResizeWindow {
+        gravity: u8,
+        flags: u8,
+        source: u8,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
+    WmMoveResize {
+        root_x: i32,
+        root_y: i32,
+        direction: u32,
+        button: u8,
+        source: u32,
+    },
+    RequestFrameExtents,
 }
 
 /// Decodes the EWMH messages handled in upstream `client_message`.
@@ -244,11 +265,35 @@ pub fn decode_ewmh_client_message(
             states: [x::Atom::new(data[1]), x::Atom::new(data[2])],
         })
     } else if message_type == atoms.net_active_window {
-        Some(EwmhClientMessage::ActiveWindow { source: data[0] })
+        Some(EwmhClientMessage::ActiveWindow {
+            source: data[0],
+            timestamp: data[1],
+            current_active: data[2],
+        })
     } else if message_type == atoms.net_wm_desktop {
         Some(EwmhClientMessage::WmDesktop { desktop: data[0] })
     } else if message_type == atoms.net_close_window {
-        Some(EwmhClientMessage::CloseWindow)
+        Some(EwmhClientMessage::CloseWindow { timestamp: data[0] })
+    } else if message_type == atoms.net_moveresize_window {
+        Some(EwmhClientMessage::MoveResizeWindow {
+            gravity: (data[0] & 0xFF) as u8,
+            flags: ((data[0] >> 8) & 0x0F) as u8,
+            source: ((data[0] >> 12) & 0x0F) as u8,
+            x: data[1].cast_signed(),
+            y: data[2].cast_signed(),
+            width: data[3],
+            height: data[4],
+        })
+    } else if message_type == atoms.net_wm_moveresize {
+        Some(EwmhClientMessage::WmMoveResize {
+            root_x: data[0].cast_signed(),
+            root_y: data[1].cast_signed(),
+            direction: data[2],
+            button: u8::try_from(data[3]).unwrap_or(0),
+            source: data[4],
+        })
+    } else if message_type == atoms.net_request_frame_extents {
+        Some(EwmhClientMessage::RequestFrameExtents)
     } else {
         None
     }

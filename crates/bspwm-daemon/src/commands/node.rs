@@ -398,6 +398,14 @@ impl CommandHandler<'_> {
                         CommandEffect::SyncEwmh,
                     ]);
                     if let (Some(monitor), Some(desktop)) = (target.monitor, target.desktop) {
+                        if self.state.world.desktop(desktop).tree.focus == Some(node) {
+                            self.neutralize_occluding_windows(
+                                monitor,
+                                desktop,
+                                node,
+                                self.state.auto_raise,
+                            );
+                        }
                         let layer = layer.protocol_name();
                         self.broadcast(
                             crate::types::SubscriberMask::NODE_LAYER,
@@ -966,8 +974,15 @@ impl CommandHandler<'_> {
                         // that is about to stop existing.
                         let node_external_id = self.state.world.tree.node(node).external_id;
                         let mut tree = self.state.world.desktop(desktop).tree;
-                        if self.state.world.tree.unlink(&mut tree, node).is_err() {
+                        let Ok(unlink_result) = self.state.world.tree.unlink(&mut tree, node)
+                        else {
                             return fail(rsp, b"");
+                        };
+                        if self.state.settings.removal_adjustment {
+                            self.state.world.tree.apply_removal_adjustment(
+                                &unlink_result,
+                                self.state.settings.automatic_scheme,
+                            );
                         }
                         self.state.world.tree.destroy_subtree(node);
                         self.state.forget_retired_nodes();

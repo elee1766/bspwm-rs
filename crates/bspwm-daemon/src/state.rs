@@ -89,6 +89,7 @@ pub enum CommandEffect {
     RefreshBorders,
     RefreshMonitors,
     RefreshFocusFollowsPointer,
+    RefreshEwmhAllowedActions,
     Focus {
         monitor: MonitorId,
         previous_monitor: Option<MonitorId>,
@@ -174,6 +175,7 @@ impl CommandEffect {
             | Self::RefreshBorders
             | Self::RefreshMonitors
             | Self::RefreshFocusFollowsPointer
+            | Self::RefreshEwmhAllowedActions
             | Self::WarpPointer { .. }
             | Self::Broadcast { .. }
             | Self::AdoptOrphans

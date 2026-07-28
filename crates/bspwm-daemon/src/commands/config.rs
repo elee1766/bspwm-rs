@@ -300,7 +300,10 @@ settings_table! {
         focus_follows_pointer,
         pointer_follows_focus,
         pointer_follows_monitor,
+        pointer_resize_sync,
         swallow_first_click,
+        enable_ewmh_ping,
+        enable_ewmh_allowed_actions,
         ignore_ewmh_focus,
         ignore_ewmh_struts,
         center_pseudo_tiled,
@@ -332,8 +335,25 @@ fn pointer_action_index(name: &str) -> Option<usize> {
 }
 
 fn queue_config_effects(state: &mut DaemonState, name: &str) {
-    if name == "split_ratio" {
+    if matches!(
+        name,
+        "split_ratio" | "pointer_motion_interval" | "pointer_resize_sync"
+    ) {
         return;
+    }
+    if name == "enable_ewmh_allowed_actions" {
+        state
+            .pending_effects
+            .push(CommandEffect::RefreshEwmhAllowedActions);
+        return;
+    }
+    if name == "enable_ewmh_ping" {
+        return;
+    }
+    if name == "ignore_ewmh_fullscreen" && state.settings.enable_ewmh_allowed_actions {
+        state
+            .pending_effects
+            .push(CommandEffect::RefreshEwmhAllowedActions);
     }
     if matches!(
         name,
@@ -376,6 +396,12 @@ fn queue_config_effects(state: &mut DaemonState, name: &str) {
         .map(|(monitor, desktop)| CommandEffect::Arrange { monitor, desktop })
         .collect();
     state.pending_effects.extend(arrangements);
+    if matches!(
+        name,
+        "top_padding" | "right_padding" | "bottom_padding" | "left_padding"
+    ) {
+        state.pending_effects.push(CommandEffect::SyncEwmh);
+    }
 }
 
 fn propagate_global_setting(state: &mut DaemonState, name: &str) {
@@ -628,6 +654,7 @@ mod tests {
         ("directional_focus_tightness", "low"),
         ("pointer_modifier", "mod4"),
         ("pointer_motion_interval", "20"),
+        ("pointer_resize_sync", "true"),
         ("mapping_events_count", "-1"),
         ("click_to_focus", "button3"),
         ("ignore_ewmh_fullscreen", "enter,exit"),
@@ -641,6 +668,8 @@ mod tests {
         ("pointer_follows_focus", "true"),
         ("pointer_follows_monitor", "true"),
         ("swallow_first_click", "true"),
+        ("enable_ewmh_ping", "true"),
+        ("enable_ewmh_allowed_actions", "true"),
         ("ignore_ewmh_focus", "true"),
         ("ignore_ewmh_struts", "true"),
         ("center_pseudo_tiled", "false"),

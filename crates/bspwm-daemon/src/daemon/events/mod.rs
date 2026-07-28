@@ -3,16 +3,21 @@
 mod pointer;
 mod window;
 
-use xcb::{Xid, XidNew, randr, x};
+use std::time::Instant;
+
+use xcb::{Xid, XidNew, randr, sync, x};
 
 use super::status::node_geometry_status;
-use super::{DaemonApp, PointerGrab};
+use super::{
+    DaemonApp, PointerGrab, SYNC_RESIZE_POLL_INTERVAL, SYNC_RESIZE_TIMEOUT, SyncResize, sync_i64,
+    timestamp_is_later,
+};
 use crate::events::EventHandler;
 use crate::monitor;
 use crate::runtime::RuntimeError;
 use crate::state::{CommandEffect, FocusPolicy};
 use crate::tree::{Client, Node, NodeId};
-use crate::types::{ClientState, Point, SubscriberMask, WmFlags};
+use crate::types::{ClientState, Point, Rectangle, SubscriberMask, WmFlags};
 use crate::world::{DesktopId, MonitorId, World};
 use crate::x11::X11;
 
@@ -23,6 +28,93 @@ pub struct XEventContext<'a> {
 }
 
 impl XEventContext<'_> {
+    fn begin_sync_resize(&self, node: NodeId) -> Option<SyncResize> {
+        if !self.app.state.settings.pointer_resize_sync || self.x11.extensions().sync.is_none() {
+            return None;
+        }
+        let counter = *self.app.sync_request_clients.get(&self.xid(node))?;
+        let current = self
+            .x11
+            .request(&sync::QueryCounter { counter })
+            .ok()?
+            .counter_value();
+        let value = sync_i64(current).wrapping_add(1);
+        Some(SyncResize {
+            counter,
+            value,
+            in_flight: false,
+            pending: None,
+            next_poll: Instant::now(),
+            deadline: Instant::now() + SYNC_RESIZE_TIMEOUT,
+        })
+    }
+
+    fn send_sync_resize(
+        &self,
+        grab: &mut PointerGrab,
+        rectangle: Rectangle,
+        timestamp: x::Timestamp,
+    ) {
+        let window = x::Window::new(self.xid(grab.node));
+        let Some(resize) = grab.sync_resize.as_mut() else {
+            crate::window::queue_move_resize(self.x11, window, rectangle);
+            return;
+        };
+        if resize.in_flight {
+            resize.pending = Some((rectangle, timestamp));
+            return;
+        }
+        crate::window::queue_sync_request(self.x11, window, timestamp, resize.value);
+        crate::window::queue_move_resize(self.x11, window, rectangle);
+        resize.in_flight = true;
+        let now = Instant::now();
+        resize.next_poll = now + SYNC_RESIZE_POLL_INTERVAL;
+        resize.deadline = now + SYNC_RESIZE_TIMEOUT;
+    }
+
+    fn finish_sync_resize(&self, grab: &mut PointerGrab) -> Result<(), RuntimeError> {
+        let Some(mut resize) = grab.sync_resize.take() else {
+            return Ok(());
+        };
+        if let Some((rectangle, timestamp)) = resize.pending.take() {
+            resize.value = resize.value.wrapping_add(1);
+            let window = x::Window::new(self.xid(grab.node));
+            crate::window::queue_sync_request(self.x11, window, timestamp, resize.value);
+            crate::window::queue_move_resize(self.x11, window, rectangle);
+        }
+        self.x11.flush()?;
+        Ok(())
+    }
+
+    fn finish_pointer_grab(&mut self) -> Result<(), RuntimeError> {
+        let live = self.app.pointer_grab_is_live();
+        let Some(mut grab) = self.app.pointer_grab.take() else {
+            return Ok(());
+        };
+        if live {
+            self.finish_sync_resize(&mut grab)?;
+        }
+        crate::pointer::ungrab_pointer(self.x11)?;
+        if !live {
+            return Ok(());
+        }
+        self.pointer_status(grab, "end");
+        let tiled_change = self.client_of(grab.node).is_some_and(|client| {
+            grab.action == crate::types::PointerAction::Move && client.state.is_tiled()
+                || matches!(
+                    grab.action,
+                    crate::types::PointerAction::ResizeSide
+                        | crate::types::PointerAction::ResizeCorner
+                ) && client.state == ClientState::Tiled
+        });
+        if tiled_change {
+            self.publish_desktop_geometry(grab.monitor, grab.desktop);
+        } else {
+            self.publish_geometry(grab.monitor, grab.desktop, grab.node);
+        }
+        Ok(())
+    }
+
     #[must_use]
     fn world(&self) -> &World {
         self.app.world()
@@ -145,6 +237,23 @@ impl XEventContext<'_> {
         policy: FocusPolicy,
     ) -> Result<bool, RuntimeError> {
         if let Some((monitor, desktop, node)) = self.app.managed_window(window.resource_id()) {
+            // A popup may temporarily own X input focus while its parent remains
+            // bspwm's focused node. Do not steal focus back before replaying the click.
+            if self.world().desktop(desktop).tree.focus == Some(node) {
+                // Upstream stacks the already-focused node on click under FFP.
+                if self.app.state.settings.focus_follows_pointer {
+                    let actions = self.app.state.stacking_order.stack(
+                        &self.app.state.world.tree,
+                        node,
+                        true,
+                        self.app.state.auto_raise,
+                    );
+                    if let Some(desktop_id) = self.app.world().node_desktop(node) {
+                        self.app.execute_restacks(self.x11, desktop_id, &actions)?;
+                    }
+                }
+                return Ok(false);
+            }
             return self.focus_with(monitor, desktop, Some(node), false, policy);
         }
         let Some(monitor) = self.monitor_at(position) else {
