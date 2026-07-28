@@ -272,13 +272,13 @@ pub fn update_desktop_geometry(x11: &X11) -> xcb::ProtocolResult<()> {
 #[must_use]
 #[allow(clippy::cast_sign_loss)]
 pub fn desktop_viewports_payload(world: &World) -> Vec<u32> {
-    let mut coordinates = Vec::new();
-    for (monitor, _) in world.desktops() {
-        let rectangle = world.monitor(monitor).rectangle;
-        coordinates.push(rectangle.x as u32);
-        coordinates.push(rectangle.y as u32);
-    }
-    coordinates
+    world
+        .desktops()
+        .flat_map(|(monitor, _)| {
+            let rectangle = world.monitor(monitor).rectangle;
+            [rectangle.x as u32, rectangle.y as u32]
+        })
+        .collect()
 }
 
 /// Writes `_NET_DESKTOP_VIEWPORT` as x/y CARDINAL pairs.
@@ -299,48 +299,49 @@ pub fn update_desktop_viewports(x11: &X11, world: &World) -> xcb::ProtocolResult
 /// Builds viewport-relative usable rectangles for `_NET_WORKAREA`.
 #[must_use]
 pub fn workareas_payload(world: &World) -> Vec<u32> {
-    let mut workareas = Vec::new();
-    for (monitor, desktop) in world.desktops() {
-        let monitor = world.monitor(monitor);
-        let desktop = world.desktop(desktop);
-        let left = monitor
-            .padding
-            .left
-            .saturating_add(desktop.padding.left)
-            .max(0);
-        let right = monitor
-            .padding
-            .right
-            .saturating_add(desktop.padding.right)
-            .max(0);
-        let top = monitor
-            .padding
-            .top
-            .saturating_add(desktop.padding.top)
-            .max(0);
-        let bottom = monitor
-            .padding
-            .bottom
-            .saturating_add(desktop.padding.bottom)
-            .max(0);
-        workareas.extend([
-            left as u32,
-            top as u32,
-            monitor
-                .rectangle
-                .width
-                .saturating_sub(left)
-                .saturating_sub(right)
-                .max(0) as u32,
-            monitor
-                .rectangle
-                .height
-                .saturating_sub(top)
-                .saturating_sub(bottom)
-                .max(0) as u32,
-        ]);
-    }
-    workareas
+    world
+        .desktops()
+        .flat_map(|(monitor_id, desktop_id)| {
+            let monitor = world.monitor(monitor_id);
+            let desktop = world.desktop(desktop_id);
+            let left = monitor
+                .padding
+                .left
+                .saturating_add(desktop.padding.left)
+                .max(0);
+            let right = monitor
+                .padding
+                .right
+                .saturating_add(desktop.padding.right)
+                .max(0);
+            let top = monitor
+                .padding
+                .top
+                .saturating_add(desktop.padding.top)
+                .max(0);
+            let bottom = monitor
+                .padding
+                .bottom
+                .saturating_add(desktop.padding.bottom)
+                .max(0);
+            [
+                left as u32,
+                top as u32,
+                monitor
+                    .rectangle
+                    .width
+                    .saturating_sub(left)
+                    .saturating_sub(right)
+                    .max(0) as u32,
+                monitor
+                    .rectangle
+                    .height
+                    .saturating_sub(top)
+                    .saturating_sub(bottom)
+                    .max(0) as u32,
+            ]
+        })
+        .collect()
 }
 
 /// Writes one usable rectangle per desktop.
@@ -450,11 +451,12 @@ pub fn update_client_desktops(x11: &X11, world: &World) -> xcb::ProtocolResult<(
 /// Builds `_NET_CLIENT_LIST` in monitor, desktop, then leaf order.
 #[must_use]
 pub fn client_list_payload(world: &World) -> Vec<u32> {
-    let mut windows = Vec::new();
-    for (_, _, root) in world.roots() {
-        windows.extend(client_leaves(world, root).map(|node| world.tree.node(node).external_id));
-    }
-    windows
+    world
+        .roots()
+        .flat_map(|(_, _, root)| {
+            client_leaves(world, root).map(|node| world.tree.node(node).external_id)
+        })
+        .collect()
 }
 
 /// Builds `_NET_CLIENT_LIST_STACKING` from bottom to top.

@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -234,12 +235,12 @@ pub fn print_report(world: &World, settings: &Settings) -> String {
     let mut report = settings.status_prefix.clone();
     for (monitor_index, monitor_id) in world.monitor_order().iter().copied().enumerate() {
         let monitor = world.monitor(monitor_id);
-        report.push(if world.focused_monitor == Some(monitor_id) {
+        let monitor_char = if world.focused_monitor == Some(monitor_id) {
             'M'
         } else {
             'm'
-        });
-        report.push_str(&monitor.name);
+        };
+        let _ = write!(report, "{}{}", monitor_char, monitor.name);
         for desktop_id in &monitor.desktops {
             let desktop = world.desktop(*desktop_id);
             let urgent = world.desktop_is_urgent(*desktop_id);
@@ -253,31 +254,27 @@ pub fn print_report(world: &World, settings: &Settings) -> String {
             if monitor.active_desktop == Some(*desktop_id) {
                 state = state.to_ascii_uppercase();
             }
-            report.push(':');
-            report.push(state);
-            report.push_str(&desktop.name);
+            let _ = write!(report, ":{}{}", state, desktop.name);
         }
         if let Some(desktop_id) = monitor.active_desktop {
             let desktop = world.desktop(desktop_id);
-            report.push_str(":L");
-            report.push(match desktop.layout {
+            let layout_char = match desktop.layout {
                 Layout::Tiled => 'T',
                 Layout::Monocle => 'M',
-            });
+            };
+            let _ = write!(report, ":L{layout_char}");
             if let Some(node_id) = desktop.tree.focus {
                 let node = world.tree.node(node_id);
-                report.push_str(":T");
-                report.push(
-                    node.client
-                        .as_ref()
-                        .map_or('@', |client| match client.state {
-                            ClientState::Tiled => 'T',
-                            ClientState::PseudoTiled => 'P',
-                            ClientState::Floating => 'F',
-                            ClientState::Fullscreen => '=',
-                        }),
-                );
-                report.push_str(":G");
+                let state_char = node
+                    .client
+                    .as_ref()
+                    .map_or('@', |client| match client.state {
+                        ClientState::Tiled => 'T',
+                        ClientState::PseudoTiled => 'P',
+                        ClientState::Floating => 'F',
+                        ClientState::Fullscreen => '=',
+                    });
+                let _ = write!(report, ":T{state_char}:G");
                 if node.sticky {
                     report.push('S');
                 }

@@ -693,13 +693,13 @@ impl World {
         for root in &roots {
             self.tree.cancel_subtree_presels(*root);
         }
-        let mut desktops = Vec::with_capacity(owned.len());
-        for desktop in owned {
-            let Some(removed) = self.desktops.remove(desktop) else {
-                continue;
-            };
-            desktops.push((desktop, removed.external_id));
-        }
+        let desktops: Vec<_> = owned
+            .into_iter()
+            .filter_map(|desktop| {
+                let removed = self.desktops.remove(desktop)?;
+                Some((desktop, removed.external_id))
+            })
+            .collect();
         self.monitor_order.remove(index);
         if self.focused_monitor == Some(monitor) {
             self.focused_monitor = self.monitor_order.first().copied();

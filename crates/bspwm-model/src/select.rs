@@ -269,7 +269,7 @@ pub fn find_closest_node(
     let start = reference
         .node
         .and_then(|node| nodes.iter().position(|loc| loc.node == Some(node)));
-    if start.is_none() {
+    let Some(start) = start else {
         let desktops = all_desktops(world);
         let desktop = reference.desktop?;
         let start = desktops
@@ -295,8 +295,7 @@ pub fn find_closest_node(
             }
         }
         return None;
-    }
-    let start = start.expect("checked above");
+    };
     let count = nodes.len().saturating_sub(1);
     (0..count).find_map(|offset| {
         let index = cycle_index(start, offset + 1, nodes.len(), direction);
