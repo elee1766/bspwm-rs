@@ -4,7 +4,7 @@
 //! [`EventHandler`] can borrow the daemon as needed, while this boundary retains
 //! protocol ordering and exposes the state needed by upstream's event filters.
 
-use xcb::{Xid, XidNew, randr, x};
+use xcb::{Xid, XidNew, randr, sync, x};
 
 use crate::types::{Rectangle, wrapping_i16, wrapping_u16};
 use crate::x11::{Atoms, X11};
@@ -53,6 +53,7 @@ pub trait EventHandler {
         event: &randr::ScreenChangeNotifyEvent,
     ) -> Result<(), Self::Error>;
     fn randr_notify(&mut self, event: &randr::NotifyEvent) -> Result<(), Self::Error>;
+    fn sync_alarm_notify(&mut self, event: &sync::AlarmNotifyEvent) -> Result<(), Self::Error>;
     fn protocol_error(&mut self, error: &xcb::ProtocolError) -> Result<(), Self::Error>;
 }
 
@@ -90,6 +91,10 @@ pub fn handle_event<H: EventHandler>(
         Ok(xcb::Event::RandR(event)) => match event {
             randr::Event::ScreenChangeNotify(event) => handler.randr_screen_change_notify(&event),
             randr::Event::Notify(event) => handler.randr_notify(&event),
+        },
+        Ok(xcb::Event::Sync(event)) => match event {
+            sync::Event::AlarmNotify(event) => handler.sync_alarm_notify(&event),
+            sync::Event::CounterNotify(_) => return Ok(DispatchOutcome::IgnoredEvent),
         },
         Ok(_) => return Ok(DispatchOutcome::IgnoredEvent),
         Err(xcb::Error::Connection(error)) => return Err(DispatchError::Connection(error)),

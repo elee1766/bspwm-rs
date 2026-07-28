@@ -99,19 +99,26 @@ struct PointerGrab {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct SyncResize {
     counter: sync::Counter,
+    alarm: sync::Alarm,
     value: i64,
     in_flight: bool,
     pending: Option<(Rectangle, x::Timestamp)>,
-    next_poll: Instant,
     deadline: Instant,
 }
 
-const SYNC_RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const SYNC_RESIZE_TIMEOUT: Duration = Duration::from_millis(250);
 const EWMH_PING_TIMEOUT: Duration = Duration::from_secs(5);
 
 const fn sync_i64(value: sync::Int64) -> i64 {
     ((value.hi as i64) << 32) | value.lo as i64
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+const fn sync_int64(value: i64) -> sync::Int64 {
+    sync::Int64 {
+        hi: (value >> 32) as i32,
+        lo: value as u32,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -218,45 +225,20 @@ impl DaemonApp {
         let Some(mut grab) = self.pointer_grab else {
             return Ok(false);
         };
-        let Some(mut resize) = grab.sync_resize else {
+        let Some(resize) = grab.sync_resize.as_ref() else {
             return Ok(false);
         };
-        if !resize.in_flight {
+        if !resize.in_flight || Instant::now() < resize.deadline {
             return Ok(false);
         }
-        let now = Instant::now();
-        if now < resize.next_poll {
-            return Ok(false);
-        }
-        resize.next_poll = now + SYNC_RESIZE_POLL_INTERVAL;
-        let acknowledged = x11
-            .request(&sync::QueryCounter {
-                counter: resize.counter,
-            })
-            .is_ok_and(|reply| sync_i64(reply.counter_value()) >= resize.value);
-        if acknowledged {
-            resize.in_flight = false;
-            resize.value = resize.value.wrapping_add(1);
-            if let Some((rectangle, timestamp)) = resize.pending.take() {
-                let window = x::Window::new(self.xid(grab.node));
-                window::queue_sync_request(x11, window, timestamp, resize.value);
-                window::queue_move_resize(x11, window, rectangle);
-                resize.in_flight = true;
-                resize.next_poll = now + SYNC_RESIZE_POLL_INTERVAL;
-                resize.deadline = now + SYNC_RESIZE_TIMEOUT;
-            }
-            grab.sync_resize = Some(resize);
-            self.pointer_grab = Some(grab);
-            return Ok(true);
-        }
-        if now < resize.deadline {
-            grab.sync_resize = Some(resize);
-            self.pointer_grab = Some(grab);
-            return Ok(false);
-        }
+        // Timeout: destroy the alarm and fall back to immediate resize.
+        let _ = x11.send_and_check_request(&sync::DestroyAlarm {
+            alarm: resize.alarm,
+        });
+        let pending = resize.pending;
         grab.sync_resize = None;
         if self.pointer_grab_is_live()
-            && let Some((rectangle, _)) = resize.pending
+            && let Some((rectangle, _)) = pending
         {
             window::move_resize(x11, x::Window::new(self.xid(grab.node)), rectangle)?;
         }
@@ -667,7 +649,12 @@ impl RuntimeApp for DaemonApp {
     fn cleanup(&mut self, x11: &X11) -> Result<(), RuntimeError> {
         self.terminate_pending_rules();
         self.pending_ewmh_pings.clear();
-        if self.pointer_grab.take().is_some() {
+        if let Some(grab) = self.pointer_grab.take() {
+            if let Some(resize) = grab.sync_resize {
+                let _ = x11.send_and_check_request(&sync::DestroyAlarm {
+                    alarm: resize.alarm,
+                });
+            }
             crate::pointer::ungrab_pointer(x11)?;
         }
         if let Some(recorder) = self.motion_recorder.take() {

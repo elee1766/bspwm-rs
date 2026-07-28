@@ -9,7 +9,7 @@ use xcb::{Xid, XidNew, randr, sync, x};
 
 use super::status::node_geometry_status;
 use super::{
-    DaemonApp, PointerGrab, SYNC_RESIZE_POLL_INTERVAL, SYNC_RESIZE_TIMEOUT, SyncResize, sync_i64,
+    DaemonApp, PointerGrab, SYNC_RESIZE_TIMEOUT, SyncResize, sync_i64, sync_int64,
     timestamp_is_later,
 };
 use crate::events::EventHandler;
@@ -39,12 +39,30 @@ impl XEventContext<'_> {
             .ok()?
             .counter_value();
         let value = sync_i64(current).wrapping_add(1);
+
+        // Create an alarm that fires when the counter reaches our target value.
+        let alarm: sync::Alarm = self.x11.connection().generate_id();
+        let target = sync_int64(value);
+        self.x11
+            .send_and_check_request(&sync::CreateAlarm {
+                id: alarm,
+                value_list: &[
+                    sync::Ca::Counter(counter),
+                    sync::Ca::ValueType(sync::Valuetype::Absolute),
+                    sync::Ca::Value(target),
+                    sync::Ca::TestType(sync::Testtype::PositiveComparison),
+                    sync::Ca::Delta(sync::Int64 { hi: 0, lo: 0 }),
+                    sync::Ca::Events(1),
+                ],
+            })
+            .ok()?;
+
         Some(SyncResize {
             counter,
+            alarm,
             value,
             in_flight: false,
             pending: None,
-            next_poll: Instant::now(),
             deadline: Instant::now() + SYNC_RESIZE_TIMEOUT,
         })
     }
@@ -64,12 +82,16 @@ impl XEventContext<'_> {
             resize.pending = Some((rectangle, timestamp));
             return;
         }
+        // Update the alarm target for the new value.
+        let target = sync_int64(resize.value);
+        let _ = self.x11.send_and_check_request(&sync::ChangeAlarm {
+            id: resize.alarm,
+            value_list: &[sync::Ca::Value(target)],
+        });
         crate::window::queue_sync_request(self.x11, window, timestamp, resize.value);
         crate::window::queue_move_resize(self.x11, window, rectangle);
         resize.in_flight = true;
-        let now = Instant::now();
-        resize.next_poll = now + SYNC_RESIZE_POLL_INTERVAL;
-        resize.deadline = now + SYNC_RESIZE_TIMEOUT;
+        resize.deadline = Instant::now() + SYNC_RESIZE_TIMEOUT;
     }
 
     fn finish_sync_resize(&self, grab: &mut PointerGrab) -> Result<(), RuntimeError> {
@@ -82,6 +104,10 @@ impl XEventContext<'_> {
             crate::window::queue_sync_request(self.x11, window, timestamp, resize.value);
             crate::window::queue_move_resize(self.x11, window, rectangle);
         }
+        // Clean up the alarm.
+        let _ = self.x11.send_and_check_request(&sync::DestroyAlarm {
+            alarm: resize.alarm,
+        });
         self.x11.flush()?;
         Ok(())
     }
@@ -786,6 +812,38 @@ impl EventHandler for XEventContext<'_> {
 
     fn randr_notify(&mut self, _event: &randr::NotifyEvent) -> Result<(), Self::Error> {
         self.app.reconcile_randr_monitors(self.x11)
+    }
+
+    fn sync_alarm_notify(&mut self, event: &sync::AlarmNotifyEvent) -> Result<(), Self::Error> {
+        let Some(mut grab) = self.app.pointer_grab else {
+            return Ok(());
+        };
+        let Some(mut resize) = grab.sync_resize else {
+            return Ok(());
+        };
+        if event.alarm() != resize.alarm || !resize.in_flight {
+            return Ok(());
+        }
+        // Counter has reached our target value -- app has repainted.
+        resize.in_flight = false;
+        resize.value = resize.value.wrapping_add(1);
+        if let Some((rectangle, timestamp)) = resize.pending.take() {
+            // Send the next coalesced geometry.
+            let window = x::Window::new(self.xid(grab.node));
+            // Update alarm target for the new value.
+            let target = sync_int64(resize.value);
+            let _ = self.x11.send_and_check_request(&sync::ChangeAlarm {
+                id: resize.alarm,
+                value_list: &[sync::Ca::Value(target)],
+            });
+            crate::window::queue_sync_request(self.x11, window, timestamp, resize.value);
+            crate::window::queue_move_resize(self.x11, window, rectangle);
+            resize.in_flight = true;
+            resize.deadline = Instant::now() + SYNC_RESIZE_TIMEOUT;
+        }
+        grab.sync_resize = Some(resize);
+        self.app.pointer_grab = Some(grab);
+        Ok(())
     }
 
     fn protocol_error(&mut self, error: &xcb::ProtocolError) -> Result<(), Self::Error> {
