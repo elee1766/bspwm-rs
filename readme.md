@@ -1,12 +1,10 @@
 # bspwm-rs
 
-a behavior-compatible rust ai rewrite of [bspwm](https://github.com/baskerville/bspwm).
+a behavior-compatible rust ai rewrite of [bspwm](https://github.com/baskerville/bspwm). you can be happy that none of this readme is ai at least.
 
-documentation that works for bspwm should work for bspwm-rs
+i made it because i wanted to fix long standing issues and bugs with bspwm, and some of these could be delivered through rust language features. the rust binary is like multiple times larger, it's quite a shame.
 
-you should even be able to use bspc with bspwm-rs with no issue.
-
-it should act mostly the same. there are some implementation differences ofc.
+documentation that works for bspwm should work for bspwm-rs. you should even be able to use bspc with bspwm-rs with no issue. it should act mostly the same. there are some implementation differences ofc.
 
 i also supposedly added support from some more ewmh extensions.
 
@@ -14,9 +12,16 @@ please tell me / open issue if you find incompatiblities with bspwm or any bugs 
 
 i might add some backwards compatible features (more commands) to it in the future. not sure
 
-supposedly https://github.com/baskerville/bspwm/issues/651 issue should be fixed here (hidden window thing maybe?)
-
 i am using this wm currently! it is ready for use! i don't use every bspwm feature though so im sure there are problems.
+
+
+## supposedly fixed issues / extra features
+
+https://github.com/baskerville/bspwm/issues/651 if the issue really was that things were getting placed below hidden windows (you can see my comment)
+
+https://github.com/baskerville/bspwm/pull/1362 should be fixed here, because the serde json encoder should do this correctly
+
+we have support for _NET_WM_MOVERESIZE https://github.com/baskerville/bspwm/pull/1183
 
 ## installation
 
@@ -30,6 +35,12 @@ i just use the makefile
 make build
 sudo make install
 ```
+
+## wayland
+
+i have **no plans** to add wayland support to this. i have been working on a separate wayland wm that is compatible with bspwm semantics, but it is written in go and it is very much for fun.
+
+i would be open to somebody contributing wayland support to this, it would be nice if it was someone who actually uses that accursed protocol. i think it would be cool to expose keyboard events over some secure socket for daemon applications to listen on.
 
 ## tests
 
