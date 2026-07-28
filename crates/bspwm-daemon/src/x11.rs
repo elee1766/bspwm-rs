@@ -165,7 +165,12 @@ impl X11 {
     /// Returns an error when the display cannot be opened, its selected screen is
     /// unavailable, atom interning fails, or the connection enters an error state.
     pub fn connect(display_name: Option<&str>) -> Result<Self, ConnectError> {
-        let optional = [Extension::RandR, Extension::Xinerama, Extension::Shape];
+        let optional = [
+            Extension::RandR,
+            Extension::Xinerama,
+            Extension::Shape,
+            Extension::Sync,
+        ];
         let (connection, default_screen) =
             xcb::Connection::connect_with_extensions(display_name, &[], &optional)?;
         connection.has_error()?;
