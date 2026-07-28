@@ -74,6 +74,7 @@ bitflags::bitflags! {
         const ABOVE = 1 << 9;
         const BELOW = 1 << 10;
         const DEMANDS_ATTENTION = 1 << 11;
+        const FOCUSED = 1 << 12;
     }
 }
 

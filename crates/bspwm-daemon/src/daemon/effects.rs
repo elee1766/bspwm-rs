@@ -105,6 +105,16 @@ impl DaemonApp {
             crate::types::StackLayer::Above => flags = flags.union(WmFlags::ABOVE),
             crate::types::StackLayer::Normal => {}
         }
+        // _NET_WM_STATE_FOCUSED: set only on the globally focused window.
+        let is_focused = self
+            .world()
+            .focused_monitor
+            .and_then(|m| self.world().monitor(m).active_desktop)
+            .and_then(|d| self.world().desktop(d).tree.focus)
+            == Some(node);
+        if is_focused {
+            flags = flags.union(WmFlags::FOCUSED);
+        }
         let window = value.external_id;
         self.client_mut(node).wm_flags = flags;
         let states = ewmh::wm_state_atoms(flags, x11.atoms());
@@ -284,6 +294,7 @@ impl DaemonApp {
                     desktop,
                     previous_desktop,
                     node,
+                    previous_node,
                     activate,
                     auto_raise,
                 } => {
@@ -302,6 +313,12 @@ impl DaemonApp {
                     }
                     if !activate && let Some(node) = self.apply_focus(x11, node)? {
                         self.sync_window_state(x11, node)?;
+                    }
+                    // Sync the previously focused node to remove _NET_WM_STATE_FOCUSED.
+                    if let Some(old) = previous_node.filter(|old| Some(*old) != node)
+                        && self.world().tree.is_live(old)
+                    {
+                        self.sync_window_state(x11, old)?;
                     }
                     if let Some(node) = node {
                         let actions = self.state.stacking_order.stack(

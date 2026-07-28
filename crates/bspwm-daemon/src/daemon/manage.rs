@@ -134,7 +134,9 @@ impl DaemonApp {
                 {
                     anchor = Some(public);
                 }
-                let value = anchor.expect("the original anchor is present");
+                // `anchor` was `Some` when we entered this `if let` and is
+                // only ever reassigned to another `Some`, so this is safe.
+                let value = anchor?;
                 if self.tree().is_protected_insertion_anchor(value) {
                     let rectangle = self.tree().placement_rectangle(value, gap);
                     let direction = if rectangle.width >= rectangle.height {
@@ -782,12 +784,21 @@ impl DaemonApp {
                     globally_focused,
                 );
             }
+            let previous_node = if globally_focused {
+                self.world()
+                    .focused_monitor
+                    .and_then(|m| self.world().monitor(m).active_desktop)
+                    .and_then(|d| self.world().desktop(d).tree.focus)
+            } else {
+                None
+            };
             self.state.pending_effects.push(CommandEffect::Focus {
                 monitor,
                 previous_monitor: self.world().focused_monitor,
                 desktop,
                 previous_desktop: Some(desktop),
                 node: successor,
+                previous_node,
                 activate: !globally_focused,
                 auto_raise: self.state.auto_raise,
             });

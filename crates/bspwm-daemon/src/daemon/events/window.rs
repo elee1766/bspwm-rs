@@ -243,7 +243,9 @@ impl XEventContext<'_> {
     ) -> Result<(), RuntimeError> {
         let id = event.window().resource_id();
         if let Some((monitor, desktop, node)) = self.app.managed_window(id) {
-            let client = self.node(node).client.clone().unwrap();
+            let Some(client) = self.node(node).client.clone() else {
+                return Ok(());
+            };
             let mask = event.value_mask();
             if client.state == crate::types::ClientState::Floating {
                 let mut rectangle = client.floating_rectangle;
@@ -304,7 +306,9 @@ impl XEventContext<'_> {
                     }
                 }
                 let value = self.node(node);
-                let client = value.client.as_ref().unwrap();
+                let Some(client) = value.client.as_ref() else {
+                    return Ok(());
+                };
                 let rectangle = if client.state == crate::types::ClientState::Fullscreen {
                     self.world().monitor(monitor).rectangle
                 } else {
@@ -454,6 +458,17 @@ impl XEventContext<'_> {
                 ..
             } => self
                 .handle_wm_moveresize(monitor, desktop, node, root_x, root_y, direction, button)?,
+            events::EwmhClientMessage::RestackWindow => {
+                let focused = self.world().desktop(desktop).tree.focus == Some(node);
+                let actions = self.app.state.stacking_order.stack(
+                    &self.app.state.world.tree,
+                    node,
+                    focused,
+                    true, // always raise on explicit restack request
+                );
+                self.app.execute_restacks(self.x11, desktop, &actions)?;
+                self.app.update_ewmh(self.x11)?;
+            }
             events::EwmhClientMessage::CurrentDesktop { .. }
             | events::EwmhClientMessage::RequestFrameExtents => unreachable!(),
         }

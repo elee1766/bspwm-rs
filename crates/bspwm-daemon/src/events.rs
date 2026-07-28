@@ -242,6 +242,7 @@ pub enum EwmhClientMessage {
         source: u32,
     },
     RequestFrameExtents,
+    RestackWindow,
 }
 
 /// Decodes the EWMH messages handled in upstream `client_message`.
@@ -292,6 +293,8 @@ pub fn decode_ewmh_client_message(
             button: u8::try_from(data[3]).unwrap_or(0),
             source: data[4],
         })
+    } else if message_type == atoms.net_restack_window {
+        Some(EwmhClientMessage::RestackWindow)
     } else if message_type == atoms.net_request_frame_extents {
         Some(EwmhClientMessage::RequestFrameExtents)
     } else {

@@ -26,6 +26,7 @@ pub fn supported_atoms(atoms: &Atoms, allowed_actions: bool) -> Vec<x::Atom> {
         atoms.net_client_list,
         atoms.net_active_window,
         atoms.net_close_window,
+        atoms.net_restack_window,
         atoms.net_moveresize_window,
         atoms.net_wm_moveresize,
         atoms.net_request_frame_extents,
@@ -44,6 +45,7 @@ pub fn supported_atoms(atoms: &Atoms, allowed_actions: bool) -> Vec<x::Atom> {
         atoms.net_wm_state_above,
         atoms.net_wm_state_sticky,
         atoms.net_wm_state_demands_attention,
+        atoms.net_wm_state_focused,
         atoms.net_wm_window_type,
         atoms.net_wm_window_type_dock,
         atoms.net_wm_window_type_desktop,
@@ -52,6 +54,7 @@ pub fn supported_atoms(atoms: &Atoms, allowed_actions: bool) -> Vec<x::Atom> {
         atoms.net_wm_window_type_utility,
         atoms.net_wm_window_type_toolbar,
         atoms.net_wm_ping,
+        atoms.net_desktop_layout,
     ];
     if allowed_actions {
         result.extend([
@@ -152,6 +155,25 @@ pub fn locate_desktop(world: &World, mut index: u32) -> Option<Coordinates> {
         index = index.wrapping_sub(1);
     }
     None
+}
+
+/// Writes `_NET_DESKTOP_LAYOUT` on the root window.
+///
+/// Uses a single horizontal row with one column per desktop and the top-left
+/// starting corner, which matches a linear desktop list.
+///
+/// # Errors
+/// Returns an X protocol error if the checked property request fails.
+pub fn update_desktop_layout(x11: &X11, world: &World) -> xcb::ProtocolResult<()> {
+    let count = number_of_desktops(world);
+    // Orientation=Horizontal(0), columns=count, rows=1, starting_corner=TopLeft(0)
+    set_property(
+        x11,
+        x11.root(),
+        x11.atoms().net_desktop_layout,
+        x::ATOM_CARDINAL,
+        &[0_u32, count, 1, 0],
+    )
 }
 
 /// Writes `_NET_NUMBER_OF_DESKTOPS` on the root window.
@@ -569,7 +591,7 @@ pub fn wm_state_atoms(flags: WmFlags, atoms: &Atoms) -> Vec<x::Atom> {
         .collect()
 }
 
-fn wm_flag_atoms(atoms: &Atoms) -> [(x::Atom, WmFlags); 12] {
+fn wm_flag_atoms(atoms: &Atoms) -> [(x::Atom, WmFlags); 13] {
     [
         (atoms.net_wm_state_modal, WmFlags::MODAL),
         (atoms.net_wm_state_sticky, WmFlags::STICKY),
@@ -586,6 +608,7 @@ fn wm_flag_atoms(atoms: &Atoms) -> [(x::Atom, WmFlags); 12] {
             atoms.net_wm_state_demands_attention,
             WmFlags::DEMANDS_ATTENTION,
         ),
+        (atoms.net_wm_state_focused, WmFlags::FOCUSED),
     ]
 }
 

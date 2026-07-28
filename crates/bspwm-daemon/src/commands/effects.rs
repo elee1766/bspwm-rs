@@ -361,6 +361,11 @@ impl CommandHandler<'_> {
         {
             self.neutralize_occluding_windows(monitor, desktop, node, policy.auto_raise);
         }
+        // Capture the previously focused node before mutating focus state,
+        // so the Focus effect handler can remove _NET_WM_STATE_FOCUSED.
+        let previous_node = previous_monitor
+            .and_then(|m| self.state.world.monitor(m).active_desktop)
+            .and_then(|d| self.state.world.desktop(d).tree.focus);
         if activate {
             if self.state.world.focused_monitor == Some(monitor)
                 && previous_desktop == Some(desktop)
@@ -412,6 +417,7 @@ impl CommandHandler<'_> {
             desktop,
             previous_desktop,
             node,
+            previous_node,
             activate,
             auto_raise: policy.auto_raise,
         });

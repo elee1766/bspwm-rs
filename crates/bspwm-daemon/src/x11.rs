@@ -33,6 +33,7 @@ xcb::atoms_struct! {
         pub net_client_list_stacking => b"_NET_CLIENT_LIST_STACKING" only_if_exists = false,
         pub net_active_window => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
         pub net_close_window => b"_NET_CLOSE_WINDOW" only_if_exists = false,
+        pub net_restack_window => b"_NET_RESTACK_WINDOW" only_if_exists = false,
         pub net_moveresize_window => b"_NET_MOVERESIZE_WINDOW" only_if_exists = false,
         pub net_wm_moveresize => b"_NET_WM_MOVERESIZE" only_if_exists = false,
         pub net_request_frame_extents => b"_NET_REQUEST_FRAME_EXTENTS" only_if_exists = false,
@@ -52,6 +53,7 @@ xcb::atoms_struct! {
         pub net_wm_state_above => b"_NET_WM_STATE_ABOVE" only_if_exists = false,
         pub net_wm_state_sticky => b"_NET_WM_STATE_STICKY" only_if_exists = false,
         pub net_wm_state_demands_attention => b"_NET_WM_STATE_DEMANDS_ATTENTION" only_if_exists = false,
+        pub net_wm_state_focused => b"_NET_WM_STATE_FOCUSED" only_if_exists = false,
         pub net_wm_state_modal => b"_NET_WM_STATE_MODAL" only_if_exists = false,
         pub net_wm_state_maximized_vert => b"_NET_WM_STATE_MAXIMIZED_VERT" only_if_exists = false,
         pub net_wm_state_maximized_horz => b"_NET_WM_STATE_MAXIMIZED_HORZ" only_if_exists = false,
@@ -77,6 +79,7 @@ xcb::atoms_struct! {
         pub net_wm_window_type_dialog => b"_NET_WM_WINDOW_TYPE_DIALOG" only_if_exists = false,
         pub net_wm_window_type_utility => b"_NET_WM_WINDOW_TYPE_UTILITY" only_if_exists = false,
         pub net_wm_window_type_toolbar => b"_NET_WM_WINDOW_TYPE_TOOLBAR" only_if_exists = false,
+        pub net_desktop_layout => b"_NET_DESKTOP_LAYOUT" only_if_exists = false,
     }
 }
 

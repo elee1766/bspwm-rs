@@ -469,6 +469,7 @@ impl DaemonApp {
 
     fn update_ewmh(&self, x11: &X11) -> Result<(), RuntimeError> {
         ewmh::update_number_of_desktops(x11, self.world())?;
+        ewmh::update_desktop_layout(x11, self.world())?;
         ewmh::update_desktop_names(x11, self.world())?;
         ewmh::update_desktop_geometry(x11)?;
         ewmh::update_desktop_viewports(x11, self.world())?;

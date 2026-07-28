@@ -96,6 +96,7 @@ pub enum CommandEffect {
         desktop: DesktopId,
         previous_desktop: Option<DesktopId>,
         node: Option<NodeId>,
+        previous_node: Option<NodeId>,
         activate: bool,
         auto_raise: bool,
     },
