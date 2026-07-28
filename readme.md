@@ -8,7 +8,9 @@ you should even be able to use bspc with bspwm-rs with no issue.
 
 it should act mostly the same. there are some implementation differences ofc.
 
-please tell me / open issue if you find incompatiblities with bspwm ill try to fix it
+i also supposedly added support from some more ewmh extensions.
+
+please tell me / open issue if you find incompatiblities with bspwm or any bugs and ill try to fix it
 
 i might add some backwards compatible features (more commands) to it in the future. not sure
 
