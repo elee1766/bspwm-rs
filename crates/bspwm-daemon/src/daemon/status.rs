@@ -41,6 +41,9 @@ impl DaemonApp {
     }
 
     pub fn broadcast_status(&mut self, mask: SubscriberMask, status: &[u8]) {
+        if self.subscribers.entries().is_empty() {
+            return;
+        }
         let report = print_report(self.world(), &self.state.settings);
         self.subscribers.put_status(mask, status, report.as_bytes());
     }

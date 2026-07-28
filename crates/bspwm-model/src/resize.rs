@@ -47,10 +47,7 @@ pub fn plan_tiled_resize(
 
 /// Applies planned ratios. Call `Tree::apply_layout` afterwards to arrange windows.
 pub fn apply_tiled_resize_plan(tree: &mut Tree, plan: TiledResizePlan) {
-    if let Some(update) = plan.vertical {
-        tree.node_mut(update.node).split_ratio = update.ratio;
-    }
-    if let Some(update) = plan.horizontal {
+    for update in plan.vertical.into_iter().chain(plan.horizontal) {
         tree.node_mut(update.node).split_ratio = update.ratio;
     }
 }

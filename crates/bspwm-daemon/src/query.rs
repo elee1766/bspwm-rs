@@ -302,12 +302,7 @@ fn node_dto(world: &World, node: NodeId) -> NodeDto<'_> {
 
 #[must_use]
 pub fn print_rectangle(rectangle: Option<&Rectangle>) -> Option<String> {
-    rectangle.map(|rectangle| {
-        format!(
-            "{}x{}+{}+{}",
-            rectangle.width, rectangle.height, rectangle.x, rectangle.y
-        )
-    })
+    rectangle.map(ToString::to_string)
 }
 
 /// The descriptor-free constraints a `query -N` may carry.

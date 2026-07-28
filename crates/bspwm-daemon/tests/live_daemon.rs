@@ -3,6 +3,7 @@
 //! These stay `#[ignore]`d: they are driven by `tests/run` against Xephyr, not
 //! by `cargo test`. They live outside `src/daemon.rs` so the unit test module
 //! there does not have to pull in X plumbing for tests it never runs.
+#![allow(clippy::field_reassign_with_default)]
 
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,7 +14,7 @@ use xcb::{Xid, XidNew, sync, x};
 use bspwm::daemon::{ClientInitial, DaemonApp, XEventContext};
 use bspwm::events::EventHandler;
 use bspwm::messages::{Domain, MessageHandler, Response};
-use bspwm::rule::{Rule, RuleConsequence, make_rule_consequence};
+use bspwm::rule::{Rule, RuleConsequence};
 use bspwm::runtime::RuntimeApp;
 use bspwm::settings::Settings;
 use bspwm::state::{CommandEffect, DaemonState};
@@ -135,7 +136,7 @@ fn live_modern_ewmh_geometry_and_floating_moveresize_round_trip() {
 
     let client: x::Window = x11.connection().generate_id();
     create_live_window(&x11, client, false);
-    let mut consequence = make_rule_consequence();
+    let mut consequence = RuleConsequence::default();
     consequence.state = Some(ClientState::Floating);
     consequence.rect = Some(Rectangle::new(10, 11, 40, 30));
     let node = manage_window_with(
@@ -462,7 +463,7 @@ fn live_command_effects_configure_properties_ewmh_and_focus_correction() {
     let second: x::Window = x11.connection().generate_id();
     create_live_window(&x11, first, false);
     create_live_window(&x11, second, false);
-    let mut consequence = make_rule_consequence();
+    let mut consequence = RuleConsequence::default();
     consequence.state = Some(ClientState::Floating);
     consequence.rect = Some(Rectangle::new(10, 10, 40, 30));
     let first_node = manage_window_with(
@@ -644,7 +645,7 @@ fn live_monitor_reconciliation_updates_adds_transfers_removes_and_cleans_roots()
 
     let client_window: x::Window = x11.connection().generate_id();
     create_live_window(&x11, client_window, false);
-    let mut consequence = make_rule_consequence();
+    let mut consequence = RuleConsequence::default();
     consequence.state = Some(ClientState::Floating);
     consequence.rect = Some(Rectangle::new(10, 10, 20, 20));
     let node = manage_window_with(

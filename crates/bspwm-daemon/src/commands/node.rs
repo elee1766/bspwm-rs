@@ -594,13 +594,7 @@ impl CommandHandler<'_> {
                         self.state
                             .pending_effects
                             .push(CommandEffect::SyncWindowState { node });
-                        let name = match flag {
-                            NodeFlag::Hidden => "hidden",
-                            NodeFlag::Sticky => "sticky",
-                            NodeFlag::Private => "private",
-                            NodeFlag::Locked => "locked",
-                            NodeFlag::Marked => "marked",
-                        };
+                        let name = flag.protocol_name();
                         if let (Some(monitor), Some(desktop)) = (target.monitor, target.desktop) {
                             self.broadcast(
                                 crate::types::SubscriberMask::NODE_FLAG,

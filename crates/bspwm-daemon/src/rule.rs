@@ -110,7 +110,7 @@ impl Drop for ExternalRuleProcess {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::float_cmp)]
+    #![allow(clippy::float_cmp, clippy::field_reassign_with_default)]
 
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -177,8 +177,8 @@ mod tests {
 
     #[test]
     fn constructors_match_upstream_defaults() {
-        assert_eq!(make_rule(), Rule::default());
-        let consequence = make_rule_consequence();
+        assert_eq!(Rule::default(), Rule::default());
+        let consequence = RuleConsequence::default();
         assert!(consequence.manage);
         assert!(consequence.focus);
         assert!(consequence.border);
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn external_rule_receives_exact_arguments_and_drains_asynchronously() {
         let path = script("sleep 0.03\nprintf '%s\\n' \"$@\"");
-        let mut consequence = make_rule_consequence();
+        let mut consequence = RuleConsequence::default();
         consequence.class_name = "Class Name".into();
         consequence.instance_name = "instance".into();
         consequence.focus = false;
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn external_rule_formats_high_window_ids_like_upstream_percent_i() {
         let path = script("printf '%s' \"$1\"");
-        let mut process = spawn_script(&path, u32::MAX, &make_rule_consequence());
+        let mut process = spawn_script(&path, u32::MAX, &RuleConsequence::default());
         await_output(&mut process);
         assert_eq!(process.output(), b"-1");
         fs::remove_file(path).unwrap();
@@ -228,7 +228,7 @@ mod tests {
     fn external_rules_complete_independently_and_empty_output_is_valid() {
         let empty = script("exit 0");
         let delayed = script("sleep 0.04\nprintf 'focus=off invalid=value'");
-        let consequence = make_rule_consequence();
+        let consequence = RuleConsequence::default();
         let mut first = spawn_script(&empty, 1, &consequence);
         let mut second = spawn_script(&delayed, 2, &consequence);
         await_output(&mut first);
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn parse_keys_values_has_strtok_pairing_and_ignores_a_dangling_key() {
-        let mut consequence = make_rule_consequence();
+        let mut consequence = RuleConsequence::default();
         parse_keys_values(
             "monitor=one, desktop two\nstate=floating focus=off dangling",
             &mut consequence,
@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn parse_key_value_covers_typed_and_boolean_consequences() {
-        let mut consequence = make_rule_consequence();
+        let mut consequence = RuleConsequence::default();
         parse_keys_values(
             "split_dir=west layer=above split_ratio=0.625junk rectangle=80x60+-2+3 honor_size_hints=tiled hidden=on sticky=true private=off locked=true marked=on center=true follow=off manage=false focus=off border=false",
             &mut consequence,
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn invalid_values_follow_upstream_reset_and_preservation_rules() {
-        let mut consequence = make_rule_consequence();
+        let mut consequence = RuleConsequence::default();
         consequence.state = Some(ClientState::Tiled);
         consequence.split_ratio = 0.4;
         consequence.rect = Some(Rectangle::default());
@@ -360,7 +360,7 @@ mod tests {
         rules.add_rule(rule("App:*:*", "focus=off", false));
         rules.add_rule(rule("App:main:*", "state=floating", true));
         rules.add_rule(rule("App:*:*", "border=off", false));
-        let mut consequence = make_rule_consequence();
+        let mut consequence = RuleConsequence::default();
         consequence.set_window_properties(&WindowProperties::new("App", "main", "title"));
 
         rules.apply_rules(&mut consequence);
@@ -378,7 +378,7 @@ mod tests {
         let mut rules = RuleList::default();
         rules.add_rule(rule("*", "state=floating focus=off", false));
         rules.add_rule(rule("App:main", "state=tiled focus=on", false));
-        let mut consequence = make_rule_consequence();
+        let mut consequence = RuleConsequence::default();
         consequence.set_window_properties(&WindowProperties::new("App", "main", "title"));
 
         rules.apply_rules(&mut consequence);
@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn consequence_format_matches_external_rule_protocol() {
-        let mut consequence = make_rule_consequence();
+        let mut consequence = RuleConsequence::default();
         parse_keys_values(
             "monitor=one desktop=two node=three state=pseudo_tiled layer=below honor_size_hints=on split_dir=south split_ratio=0.5 hidden=on rectangle=100x80+-1+2",
             &mut consequence,
@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn built_in_rules_follow_upstream_order() {
-        let mut consequence = make_rule_consequence();
+        let mut consequence = RuleConsequence::default();
         apply_builtin_rules(
             &BuiltinRuleProperties {
                 window_types: vec![BuiltinWindowType::Utility, BuiltinWindowType::Dialog],

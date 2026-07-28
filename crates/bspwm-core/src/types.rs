@@ -317,6 +317,12 @@ impl Rectangle {
     }
 }
 
+impl std::fmt::Display for Rectangle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}x{}+{}+{}", self.width, self.height, self.x, self.y)
+    }
+}
+
 #[allow(clippy::cast_possible_truncation)]
 #[must_use]
 pub const fn wrapping_i16(value: i32) -> i16 {

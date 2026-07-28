@@ -46,11 +46,6 @@ impl Rule {
     }
 }
 
-#[must_use]
-pub fn make_rule() -> Rule {
-    Rule::default()
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WindowProperties {
     pub class_name: String,
@@ -198,11 +193,6 @@ impl fmt::Display for RuleConsequence {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(output, "{}", print_rule_consequence(self))
     }
-}
-
-#[must_use]
-pub fn make_rule_consequence() -> RuleConsequence {
-    RuleConsequence::default()
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -361,7 +351,10 @@ pub fn print_rule_consequence(consequence: &RuleConsequence) -> String {
         on_off(consequence.manage),
         on_off(consequence.focus),
         on_off(consequence.border),
-        consequence.rect.map_or_else(String::new, rectangle_string),
+        match consequence.rect {
+            Some(r) => r.to_string(),
+            None => String::new(),
+        },
     )
 }
 
@@ -399,11 +392,4 @@ fn parse_float_prefix(input: &str) -> Option<f64> {
 
 const fn on_off(value: bool) -> &'static str {
     if value { "on" } else { "off" }
-}
-
-fn rectangle_string(rectangle: Rectangle) -> String {
-    format!(
-        "{}x{}+{}+{}",
-        rectangle.width, rectangle.height, rectangle.x, rectangle.y
-    )
 }

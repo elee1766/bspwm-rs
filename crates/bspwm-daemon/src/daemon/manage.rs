@@ -8,10 +8,7 @@ use super::{DaemonApp, WindowLocation};
 use crate::events::EventHandler;
 use crate::ewmh;
 use crate::monitor;
-use crate::rule::{
-    ExternalRuleProcess, RuleConsequence, apply_builtin_rules, make_rule_consequence,
-    parse_keys_values,
-};
+use crate::rule::{ExternalRuleProcess, RuleConsequence, apply_builtin_rules, parse_keys_values};
 use crate::runtime::RuntimeError;
 use crate::state::CommandEffect;
 use crate::tree::{ChildPolarity, Client, IcccmProps, SizeHints};
@@ -178,9 +175,13 @@ impl DaemonApp {
                 self.world().monitor(monitor).rectangle,
             );
         }
-        if consequence.center
-            || consequence.rect.is_none() && initial_rectangle.x == 0 && initial_rectangle.y == 0
-        {
+        // Upstream centers when x == 0 && y == 0. Many clients (Steam, some Qt
+        // apps) use small negative sentinels like (-1, -1) to mean "no
+        // preference." Also center when the initial position falls outside the
+        // target monitor, which prevents a configure-request-driven cross-monitor
+        // transfer to the wrong desktop immediately after management.
+        let unpositioned = initial_rectangle.x <= 0 && initial_rectangle.y <= 0;
+        if consequence.center || consequence.rect.is_none() && unpositioned {
             client.floating_rectangle = window::center(
                 client.floating_rectangle,
                 self.world().monitor(monitor).rectangle,
@@ -363,7 +364,7 @@ impl DaemonApp {
         if properties.override_redirect {
             return Ok(None);
         }
-        let mut consequence = make_rule_consequence();
+        let mut consequence = RuleConsequence::default();
         let desktop_window = properties
             .builtin
             .window_types
@@ -821,6 +822,7 @@ fn timestamp_is_later(candidate: x::Timestamp, reference: x::Timestamp) -> bool 
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use crate::arrange;
@@ -981,7 +983,7 @@ mod tests {
     #[test]
     fn consequence_placement_applies_fields_and_uses_unique_internal_ids() {
         let (mut app, monitor, desktop) = app_with_desktop();
-        let mut consequence = make_rule_consequence();
+        let mut consequence = RuleConsequence::default();
         consequence
             .set_window_properties(&crate::rule::WindowProperties::new("App", "main", "Title"));
         consequence.state = Some(ClientState::Floating);
@@ -1084,7 +1086,7 @@ mod tests {
             split_ratio: 0.8,
             feedback: None,
         });
-        let mut consequence = make_rule_consequence();
+        let mut consequence = RuleConsequence::default();
         consequence.split_dir = Some(Direction::South);
         consequence.split_ratio = 0.3;
 
@@ -1121,7 +1123,7 @@ mod tests {
             split_ratio: 0.8,
             feedback: None,
         });
-        let mut consequence = make_rule_consequence();
+        let mut consequence = RuleConsequence::default();
         consequence.split_ratio = 0.25;
 
         let inserted = manage_window_with(
@@ -1239,7 +1241,7 @@ mod tests {
     #[test]
     fn initial_hidden_and_fullscreen_clients_are_vacant() {
         let (mut app, _, _) = app_with_desktop();
-        let mut consequence = make_rule_consequence();
+        let mut consequence = RuleConsequence::default();
         consequence.hidden = true;
         let hidden = manage_window_with(
             &mut app,
@@ -1254,7 +1256,7 @@ mod tests {
         assert!(app.state.world.tree.node(hidden).vacant);
 
         let (mut app, _, _) = app_with_desktop();
-        let mut consequence = make_rule_consequence();
+        let mut consequence = RuleConsequence::default();
         consequence.state = Some(ClientState::Fullscreen);
         let fullscreen = manage_window_with(
             &mut app,
@@ -1282,7 +1284,7 @@ mod tests {
         let second_desktop = app.state.world.create_desktop(4, Some("II"), &settings);
         assert!(app.state.world.add_desktop(second_monitor, second_desktop));
 
-        let mut consequence = make_rule_consequence();
+        let mut consequence = RuleConsequence::default();
         consequence.monitor_desc = "other".into();
         consequence.focus = false;
         let monitor_target = manage_window_with(

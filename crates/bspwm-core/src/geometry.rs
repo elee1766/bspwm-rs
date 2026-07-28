@@ -86,14 +86,6 @@ pub const fn on_dir_side(
     }
 }
 
-#[must_use]
-pub const fn rect_eq(first: Rectangle, second: Rectangle) -> bool {
-    first.x == second.x
-        && first.y == second.y
-        && first.width == second.width
-        && first.height == second.height
-}
-
 /// Upstream `rect_cmp`: spatial order first, then descending area.
 ///
 /// # This is not a total order
@@ -171,10 +163,10 @@ pub const fn adapt_geometry(
     source: Rectangle,
     destination: Rectangle,
 ) -> Rectangle {
-    let left_adjust = max_i32(source.left() - rectangle.left(), 0);
-    let top_adjust = max_i32(source.top() - rectangle.top(), 0);
-    let right_adjust = max_i32(rectangle.right() - source.right(), 0);
-    let bottom_adjust = max_i32(rectangle.bottom() - source.bottom(), 0);
+    let left_adjust = const_max(source.left() - rectangle.left(), 0);
+    let top_adjust = const_max(source.top() - rectangle.top(), 0);
+    let right_adjust = const_max(rectangle.right() - source.right(), 0);
+    let bottom_adjust = const_max(rectangle.bottom() - source.bottom(), 0);
 
     rectangle.x = rectangle.left().saturating_add(left_adjust);
     rectangle.y = rectangle.top().saturating_add(top_adjust);
@@ -213,8 +205,8 @@ pub const fn adapt_geometry(
     rectangle
 }
 
-const fn max_i32(first: i32, second: i32) -> i32 {
-    if first > second { first } else { second }
+const fn const_max(a: i32, b: i32) -> i32 {
+    if a > b { a } else { b }
 }
 
 #[cfg(test)]
@@ -302,6 +294,6 @@ mod tests {
         assert_eq!(rect_cmp(above, CENTER), Ordering::Less);
         assert_eq!(rect_cmp(left, CENTER), Ordering::Less);
         assert_eq!(rect_cmp(larger_overlap, CENTER), Ordering::Less);
-        assert!(rect_eq(CENTER, CENTER));
+        assert_eq!(CENTER, CENTER);
     }
 }

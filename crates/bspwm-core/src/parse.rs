@@ -201,18 +201,12 @@ pub fn is_hex_color(value: &str) -> bool {
 
 #[must_use]
 pub fn parse_honor_size_hints_mode(input: &str) -> Option<HonorSizeHintsMode> {
-    if let Some(value) = parse_bool(input) {
-        Some(if value {
-            HonorSizeHintsMode::Yes
-        } else {
-            HonorSizeHintsMode::No
-        })
-    } else {
-        match input {
-            "floating" => Some(HonorSizeHintsMode::Floating),
-            "tiled" => Some(HonorSizeHintsMode::Tiled),
-            _ => None,
-        }
+    match input {
+        "true" | "on" => Some(HonorSizeHintsMode::Yes),
+        "false" | "off" => Some(HonorSizeHintsMode::No),
+        "floating" => Some(HonorSizeHintsMode::Floating),
+        "tiled" => Some(HonorSizeHintsMode::Tiled),
+        _ => None,
     }
 }
 

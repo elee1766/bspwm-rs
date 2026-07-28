@@ -126,6 +126,19 @@ pub enum NodeFlag {
     Marked,
 }
 
+impl NodeFlag {
+    #[must_use]
+    pub const fn protocol_name(self) -> &'static str {
+        match self {
+            Self::Hidden => "hidden",
+            Self::Sticky => "sticky",
+            Self::Private => "private",
+            Self::Locked => "locked",
+            Self::Marked => "marked",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Client {
     pub class_name: String,
@@ -256,6 +269,16 @@ impl Node {
             second_child: None,
             client: None,
         }
+    }
+}
+
+/// Picks the split axis that halves the rectangle's longest side.
+#[must_use]
+pub const fn longest_side_split(rectangle: Rectangle) -> SplitType {
+    if rectangle.width > rectangle.height {
+        SplitType::Vertical
+    } else {
+        SplitType::Horizontal
     }
 }
 
@@ -541,17 +564,11 @@ impl Tree {
             return Ok(None);
         }
 
-        let longest_side = || {
-            let rectangle = self.node(anchor).rectangle;
-            if rectangle.width > rectangle.height {
-                SplitType::Vertical
-            } else {
-                SplitType::Horizontal
-            }
-        };
         let split_type = match parent {
-            None => longest_side(),
-            Some(_) if scheme == AutomaticScheme::LongestSide || single_tiled => longest_side(),
+            None => longest_side_split(self.node(anchor).rectangle),
+            Some(_) if scheme == AutomaticScheme::LongestSide || single_tiled => {
+                longest_side_split(self.node(anchor).rectangle)
+            }
             Some(parent) => {
                 let mut candidate = Some(parent);
                 while let Some(node) = candidate {
@@ -732,12 +749,8 @@ impl Tree {
                 self.rotate(sibling, degree);
             }
             AutomaticScheme::LongestSide => {
-                let rect = self.node(sibling).rectangle;
-                self.node_mut(sibling).split_type = if rect.width > rect.height {
-                    SplitType::Vertical
-                } else {
-                    SplitType::Horizontal
-                };
+                self.node_mut(sibling).split_type =
+                    longest_side_split(self.node(sibling).rectangle);
             }
             AutomaticScheme::Alternate => {
                 if let Some(grandparent) = self.node(sibling).parent {
@@ -747,12 +760,8 @@ impl Tree {
                     };
                 } else {
                     // No grandparent = root; fall back to longest side
-                    let rect = self.node(sibling).rectangle;
-                    self.node_mut(sibling).split_type = if rect.width > rect.height {
-                        SplitType::Vertical
-                    } else {
-                        SplitType::Horizontal
-                    };
+                    self.node_mut(sibling).split_type =
+                        longest_side_split(self.node(sibling).rectangle);
                 }
             }
         }
