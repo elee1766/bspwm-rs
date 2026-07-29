@@ -608,15 +608,22 @@ impl XEventContext<'_> {
             let old_parent = self.client(node).transient_for;
             if new_parent != old_parent {
                 self.client_mut(node).transient_for = new_parent;
-                // Reconcile stacking so the child appears above its new parent.
-                if let Some(new_parent_xid) = new_parent {
-                    let child_xid = self.xid(node);
+                let child_xid = self.xid(node);
+                if let Some(parent_xid) = new_parent {
+                    self.app
+                        .state
+                        .stacking_order
+                        .set_transient(child_xid, parent_xid);
+                } else {
+                    self.app.state.stacking_order.clear_transient(child_xid);
+                }
+                // Reconcile stacking.
+                if new_parent.is_some() {
                     let mut backend = crate::daemon::monitors::X11StackBackend { x11: self.x11 };
-                    self.app.state.stacking_order.enforce_transient(
-                        &mut backend,
-                        child_xid,
-                        new_parent_xid,
-                    )?;
+                    self.app
+                        .state
+                        .stacking_order
+                        .raise_in_level(&mut backend, child_xid)?;
                 }
                 self.app.sync_stacking_ewmh(self.x11, desktop)?;
                 self.app.update_ewmh(self.x11)?;

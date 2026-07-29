@@ -391,27 +391,6 @@ impl DaemonApp {
                                         true,
                                     )?;
                                 }
-                                // Enforce transient-above-parent: any window
-                                // declaring this node as its WM_TRANSIENT_FOR
-                                // parent must be above it.
-                                let children: Vec<_> = self
-                                    .state
-                                    .stacking_order
-                                    .windows()
-                                    .iter()
-                                    .filter_map(|&w| {
-                                        let (_, _, n) = self.managed_window(w)?;
-                                        let c = self.node(n).client.as_ref()?;
-                                        (c.transient_for == Some(xid)).then_some(w)
-                                    })
-                                    .collect();
-                                for child in children {
-                                    self.state.stacking_order.enforce_transient(
-                                        &mut backend,
-                                        child,
-                                        xid,
-                                    )?;
-                                }
                             }
                             self.sync_stacking_ewmh(x11, desktop)?;
                         }

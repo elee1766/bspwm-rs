@@ -30,8 +30,12 @@ pub trait StackBackend {
 /// the last index is the topmost.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StackMirror {
-    /// Current order, bottom to top. Each entry is (window_xid, level).
+    /// Current order, bottom to top. Each entry is (`window_xid`, level).
     order: Vec<Entry>,
+    /// Registered transient relationships: (child, parent).
+    /// After any stacking operation, all transient children are enforced
+    /// above their parents.
+    transients: Vec<(u32, u32)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,7 +48,10 @@ impl StackMirror {
     /// Creates an empty mirror.
     #[must_use]
     pub fn new() -> Self {
-        Self { order: Vec::new() }
+        Self {
+            order: Vec::new(),
+            transients: Vec::new(),
+        }
     }
 
     /// Seeds the mirror from an existing X stacking order (bottom to top)
@@ -59,6 +66,7 @@ impl StackMirror {
                     level: level_fn(w),
                 })
                 .collect(),
+            transients: Vec::new(),
         }
     }
 
@@ -145,6 +153,18 @@ impl StackMirror {
         }
     }
 
+    /// Register a transient-for relationship. The child will be
+    /// automatically kept above the parent after every stacking operation.
+    pub fn set_transient(&mut self, child: u32, parent: u32) {
+        self.transients.retain(|&(c, _)| c != child);
+        self.transients.push((child, parent));
+    }
+
+    /// Remove a transient-for relationship for `child`.
+    pub fn clear_transient(&mut self, child: u32) {
+        self.transients.retain(|&(c, _)| c != child);
+    }
+
     /// Record that `MapWindow` was called, which raises the window to the
     /// absolute top of X siblings. The mirror is updated to match.
     /// Call this AFTER the actual `MapWindow` X request.
@@ -187,6 +207,40 @@ impl StackMirror {
         Ok(())
     }
 
+    /// Enforce all registered transient relationships. Called after every
+    /// stacking mutation to ensure transient children stay above parents.
+    fn enforce_all_transients<B: StackBackend>(&mut self, backend: &mut B) -> Result<(), B::Error> {
+        // Iterate until stable (handles chains). Limited to avoid cycles.
+        for _ in 0..self.transients.len().saturating_add(1) {
+            let mut moved = false;
+            for i in 0..self.transients.len() {
+                let (child, parent) = self.transients[i];
+                let Some(child_pos) = self.position(child) else {
+                    continue;
+                };
+                let Some(parent_pos) = self.position(parent) else {
+                    continue;
+                };
+                if child_pos > parent_pos {
+                    continue;
+                }
+                let entry = self.order.remove(child_pos);
+                let insert_at = if parent_pos > child_pos {
+                    parent_pos
+                } else {
+                    parent_pos + 1
+                };
+                self.order.insert(insert_at, entry);
+                backend.stack_above(child, parent)?;
+                moved = true;
+            }
+            if !moved {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     // --- Internal helpers ---
 
     fn position(&self, window: u32) -> Option<usize> {
@@ -225,7 +279,7 @@ impl StackMirror {
         if was_present || self.order.len() > 1 {
             self.apply_position(backend, insert_at)?;
         }
-        Ok(())
+        self.enforce_all_transients(backend)
     }
 
     /// Move window to the bottom of `level`. Emits at most one X operation.
@@ -251,7 +305,7 @@ impl StackMirror {
         if was_present || self.order.len() > 1 {
             self.apply_position(backend, insert_at)?;
         }
-        Ok(())
+        self.enforce_all_transients(backend)
     }
 
     /// Emit one X operation to position the entry at `index` relative to

@@ -536,7 +536,7 @@ impl DaemonApp {
             if let Some(parent_xid) = transient_for {
                 self.state
                     .stacking_order
-                    .enforce_transient(&mut backend, window_id, parent_xid)?;
+                    .set_transient(window_id, parent_xid);
             }
         }
         self.sync_stacking_ewmh(x11, desktop)?;
@@ -729,9 +729,9 @@ impl DaemonApp {
         // Remove all client leaves of this subtree from the stacking mirror.
         for leaf in self.state.world.tree.leaves(node) {
             if self.state.world.tree.node(leaf).client.is_some() {
-                self.state
-                    .stacking_order
-                    .remove(self.state.world.tree.node(leaf).external_id);
+                let xid = self.state.world.tree.node(leaf).external_id;
+                self.state.stacking_order.remove(xid);
+                self.state.stacking_order.clear_transient(xid);
             }
         }
         self.tree_mut().cancel_presel(node);
