@@ -6,8 +6,8 @@ license = "BSD-2-Clause"
 description = "A behavior-compatible Rust transcription of bspwm"
 
 [workspace]
-members = [".", "crates/bspwm-client", "crates/bspwm-core", "crates/bspwm-daemon", "crates/bspwm-model"]
-default-members = [".", "crates/bspwm-client", "crates/bspwm-core", "crates/bspwm-daemon", "crates/bspwm-model"]
+members = [".", "crates/bspwm-client", "crates/bspwm-core", "crates/bspwm-daemon", "crates/bspwm-model", "crates/stack-mirror"]
+default-members = [".", "crates/bspwm-client", "crates/bspwm-core", "crates/bspwm-daemon", "crates/bspwm-model", "crates/stack-mirror"]
 resolver = "3"
 
 [[bin]]

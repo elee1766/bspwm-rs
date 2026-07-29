@@ -1,0 +1,15 @@
+[package]
+name = "stack-mirror"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+description = "X11 stacking order mirror with level-aware operations and minimum-diff output"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+missing_errors_doc = "allow"
+doc_markdown = "allow"
