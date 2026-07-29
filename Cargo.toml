@@ -22,6 +22,8 @@ path = "src/bin/bspc-rs.rs"
 bspwm-client = { version = "0.9.12", path = "crates/bspwm-client" }
 bspwm = { package = "bspwm-daemon", version = "0.9.12", path = "crates/bspwm-daemon" }
 xcb = { version = "1.7.0", features = ["randr", "shape", "xinerama"] }
+log = "0.4"
+env_logger = "0.11"
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -20,6 +20,7 @@ nix = { version = "0.30", features = ["fs", "poll", "process", "signal", "socket
 mio = { version = "1", features = ["os-poll", "os-ext"] }
 listenfd = "1.0.2"
 signal-hook = "0.4.4"
+log = "0.4"
 
 [lints.rust]
 unsafe_code = "forbid"

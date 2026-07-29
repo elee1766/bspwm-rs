@@ -458,6 +458,12 @@ impl DaemonApp {
         if consequence.focus && !focus_allowed {
             consequence.focus = false;
         }
+        if consequence.border
+            && self.state.settings.borderless_csd
+            && ewmh::has_csd(x11, window_id_typed)
+        {
+            consequence.border = false;
+        }
         let user_time_window = client_initial.user_time_window;
         let user_time = client_initial.user_time;
         let internal_xid = x11.connection().generate_id::<x::Window>().resource_id();

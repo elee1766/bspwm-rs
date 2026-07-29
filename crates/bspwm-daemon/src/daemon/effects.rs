@@ -274,15 +274,28 @@ impl DaemonApp {
                 }
                 CommandEffect::RefreshMonitors => self.reconcile_randr_monitors(x11)?,
                 CommandEffect::RefreshFocusFollowsPointer => {
+                    let ffp = self.state.settings.focus_follows_pointer;
                     for node in self.all_client_nodes() {
                         let id = self.xid(node);
                         Self::execute_action(
                             x11,
                             XAction::SetClientEventMask {
                                 window: id,
-                                enter_window: self.state.settings.focus_follows_pointer,
+                                enter_window: ffp,
                             },
                         )?;
+                    }
+                    // Map or unmap monitor root windows so cross-monitor
+                    // EnterNotify events are delivered when FFP is on.
+                    for monitor in self.world().monitor_order().to_vec() {
+                        if let Some(root) = self.world().monitor(monitor).root_id {
+                            let window = x::Window::new(root);
+                            if ffp {
+                                x11.send_and_check_request(&x::MapWindow { window })?;
+                            } else {
+                                x11.send_and_check_request(&x::UnmapWindow { window })?;
+                            }
+                        }
                     }
                 }
                 CommandEffect::RefreshEwmhAllowedActions => {

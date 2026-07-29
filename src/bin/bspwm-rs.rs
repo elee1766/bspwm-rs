@@ -1,5 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::io::Write;
 use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
@@ -122,8 +123,21 @@ fn parse_arguments(arguments: &[OsString]) -> Result<Arguments, ParseError> {
     Ok(parsed)
 }
 
+fn init_logger() {
+    let mut builder = env_logger::Builder::new();
+    builder.filter_level(log::LevelFilter::Warn);
+    builder.parse_default_env();
+    builder.format(|buf, record| {
+        let timestamp = buf.timestamp_seconds();
+        writeln!(buf, "{timestamp} [{}] {}", record.level(), record.args())
+    });
+    builder.init();
+}
+
 fn main() {
     const FAILURE: i32 = 1;
+
+    init_logger();
 
     let original_args: Vec<OsString> = std::env::args_os().collect();
     let arguments = match parse_arguments(&original_args[1..]) {

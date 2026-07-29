@@ -80,6 +80,7 @@ xcb::atoms_struct! {
         pub net_wm_window_type_utility => b"_NET_WM_WINDOW_TYPE_UTILITY" only_if_exists = false,
         pub net_wm_window_type_toolbar => b"_NET_WM_WINDOW_TYPE_TOOLBAR" only_if_exists = false,
         pub net_desktop_layout => b"_NET_DESKTOP_LAYOUT" only_if_exists = false,
+        pub net_wm_opaque_region => b"_NET_WM_OPAQUE_REGION" only_if_exists = false,
     }
 }
 

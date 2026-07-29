@@ -807,7 +807,14 @@ impl<A: RuntimeApp> Runtime<A> {
         inherited.push(self.listener.raw_fd());
         self.cleanup()?;
 
-        let executable = env::current_exe()?;
+        // Use original argv[0] rather than /proc/self/exe: when the binary is
+        // replaced on disk (e.g. `cp` before restart), /proc/self/exe points
+        // to the deleted old inode, causing "No such file or directory".
+        let executable = self
+            .original_args
+            .first()
+            .cloned()
+            .unwrap_or_else(|| env::current_exe().unwrap_or_default().into());
         let arguments = restart_arguments(&self.original_args, &state_path, self.listener.raw_fd());
         let first = inherited.iter().copied().min().unwrap_or(3);
         let last = inherited.iter().copied().max().unwrap_or(first);

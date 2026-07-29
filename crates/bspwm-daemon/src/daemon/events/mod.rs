@@ -263,9 +263,15 @@ impl XEventContext<'_> {
         policy: FocusPolicy,
     ) -> Result<bool, RuntimeError> {
         if let Some((monitor, desktop, node)) = self.app.managed_window(window.resource_id()) {
-            // A popup may temporarily own X input focus while its parent remains
-            // bspwm's focused node. Do not steal focus back before replaying the click.
-            if self.world().desktop(desktop).tree.focus == Some(node) {
+            // Upstream compares against mon->desk->focus, i.e. the globally
+            // focused node, not the clicked node's desktop focus. This ensures
+            // cross-monitor clicks always trigger a focus change.
+            let globally_focused = self
+                .world()
+                .focused_monitor
+                .and_then(|m| self.world().monitor(m).active_desktop)
+                .and_then(|d| self.world().desktop(d).tree.focus);
+            if globally_focused == Some(node) {
                 // Upstream stacks the already-focused node on click under FFP.
                 if self.app.state.settings.focus_follows_pointer {
                     let actions = self.app.state.stacking_order.stack(
@@ -851,7 +857,7 @@ impl EventHandler for XEventContext<'_> {
         // manager already moved past, and upstream bspwm keeps running after
         // them. Report and continue rather than tearing down every client's
         // session over one rejected request.
-        eprintln!("bspwm: X protocol error: {error}");
+        log::warn!("X protocol error: {error}");
         Ok(())
     }
 }

@@ -636,6 +636,37 @@ pub fn get_strut_partial(x11: &X11, window: x::Window) -> xcb::Result<Option<Str
     }
 }
 
+/// Returns `true` when the window sets `_NET_WM_OPAQUE_REGION` to an area
+/// that does not cover its full geometry, indicating client-side decorations
+/// with transparent margins (shadows, resize grips, rounded corners).
+#[must_use]
+pub fn has_csd(x11: &X11, window: x::Window) -> bool {
+    let Ok(geom) = crate::window::geometry(x11, window) else {
+        return false;
+    };
+    let values: Vec<u32> = match crate::window::get_property(
+        x11,
+        window,
+        x11.atoms().net_wm_opaque_region,
+        x::ATOM_CARDINAL,
+    ) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return false,
+    };
+    // _NET_WM_OPAQUE_REGION is a list of rectangles: [x, y, width, height, ...]
+    if values.len() < 4 || !values.len().is_multiple_of(4) {
+        return false;
+    }
+    // Check if the first rectangle covers less than the full window.
+    let ox = values[0];
+    let oy = values[1];
+    let ow = values[2];
+    let oh = values[3];
+    let win_w = u32::try_from(geom.rectangle.width).unwrap_or(0);
+    let win_h = u32::try_from(geom.rectangle.height).unwrap_or(0);
+    ox > 0 || oy > 0 || ow < win_w || oh < win_h
+}
+
 fn client_leaves(world: &World, root: NodeId) -> impl Iterator<Item = NodeId> + '_ {
     world
         .tree

@@ -202,7 +202,7 @@ impl DaemonApp {
         }
         for window in expired {
             self.pending_ewmh_pings.remove(&window);
-            eprintln!("bspwm: _NET_WM_PING timeout for window 0x{window:08X}");
+            log::warn!("_NET_WM_PING timeout for window 0x{window:08X}");
             changed = true;
         }
         changed
@@ -597,7 +597,20 @@ impl RuntimeApp for DaemonApp {
     }
 
     fn run_config(&mut self, path: &Path, run_level: u8) -> Result<(), RuntimeError> {
-        Command::new(path).arg(run_level.to_string()).spawn()?;
+        use std::process::Stdio;
+        let mut cmd = Command::new(path);
+        cmd.arg(run_level.to_string());
+        // Redirect child stderr to BSPWM_CHILD_LOG if set, keeping the
+        // daemon's own stderr clean for backtraces and log output.
+        if let Ok(log_path) = std::env::var("BSPWM_CHILD_LOG")
+            && let Ok(file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+        {
+            cmd.stderr(Stdio::from(file));
+        }
+        cmd.spawn()?;
         Ok(())
     }
 
