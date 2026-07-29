@@ -250,12 +250,19 @@ impl XEventContext<'_> {
             if client.state == crate::types::ClientState::Floating {
                 let mut rectangle = client.floating_rectangle;
                 if mask.contains(x::ConfigWindowMask::X) {
-                    rectangle.x = i32::from(event.x())
+                    let requested = i32::from(event.x())
                         .wrapping_sub(i32::try_from(client.border_width).unwrap_or(i32::MAX));
+                    // Ignore negative sentinel positions (e.g. Steam uses -1).
+                    if requested >= 0 {
+                        rectangle.x = requested;
+                    }
                 }
                 if mask.contains(x::ConfigWindowMask::Y) {
-                    rectangle.y = i32::from(event.y())
+                    let requested = i32::from(event.y())
                         .wrapping_sub(i32::try_from(client.border_width).unwrap_or(i32::MAX));
+                    if requested >= 0 {
+                        rectangle.y = requested;
+                    }
                 }
                 let (width, height) = requested_size(event, rectangle);
                 let (width, height) = crate::arrange::apply_size_hints(&client, width, height);
@@ -270,9 +277,15 @@ impl XEventContext<'_> {
                     rectangle,
                 );
                 self.publish(SubscriberMask::NODE_GEOMETRY, &status);
+                // Skip cross-monitor transfer when the requested position is
+                // clearly a sentinel (negative coordinates). Apps like Steam
+                // send ConfigureRequests with (-1,-1) meaning "no preference",
+                // which would otherwise map to the leftmost monitor.
                 let monitors = self.app.monitor_rectangles();
-                if let Some(destination_monitor) =
-                    monitor::monitor_from_client(&monitors, rectangle)
+                if rectangle.x >= 0
+                    && rectangle.y >= 0
+                    && let Some(destination_monitor) =
+                        monitor::monitor_from_client(&monitors, rectangle)
                     && destination_monitor != monitor
                     && let Some(destination_desktop) =
                         self.world().monitor(destination_monitor).active_desktop

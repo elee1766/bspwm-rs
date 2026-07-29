@@ -211,6 +211,23 @@ impl DaemonApp {
             self.sync_window_state(x11, node)?;
         }
         self.refresh_colors(x11)?;
+        // Restack all visible desktops so the X server matches the restored
+        // model stacking order. Without this, windows appear in map order
+        // after restart instead of their saved stacking positions.
+        for monitor in self.world().monitor_order().to_vec() {
+            if let Some(desktop) = self.world().monitor(monitor).active_desktop
+                && let Some(root) = self.world().desktop(desktop).tree.root
+            {
+                let focused = self.world().desktop(desktop).tree.focus;
+                let actions = self.state.stacking_order.stack(
+                    &self.state.world.tree,
+                    root,
+                    focused.is_some(),
+                    self.state.auto_raise,
+                );
+                self.execute_restacks(x11, desktop, &actions)?;
+            }
+        }
         self.update_ewmh(x11)?;
         let focus = self
             .world()
