@@ -60,7 +60,7 @@ pub(super) fn node_geometry_status(
     rectangle: Rectangle,
 ) -> String {
     format!(
-        "node_geometry 0x{monitor:08X} 0x{desktop:08X} 0x{node:08X} {}x{}{:+}{:+}\n",
+        "node_geometry 0x{monitor:08X} 0x{desktop:08X} 0x{node:08X} {}x{}+{}+{}\n",
         rectangle.width, rectangle.height, rectangle.x, rectangle.y,
     )
 }
@@ -171,7 +171,7 @@ mod tests {
     fn arrangement_and_stack_subscription_records_match_upstream_bytes() {
         assert_eq!(
             node_geometry_status(1, 2, 3, Rectangle::new(-4, 5, 60, 70)),
-            "node_geometry 0x00000001 0x00000002 0x00000003 60x70-4+5\n"
+            "node_geometry 0x00000001 0x00000002 0x00000003 60x70+-4+5\n"
         );
         assert_eq!(
             node_stack_status(0x10, "below", 0x20),
