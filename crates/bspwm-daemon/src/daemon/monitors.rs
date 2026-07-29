@@ -21,20 +21,24 @@ pub(super) struct X11StackBackend<'a> {
 impl stack_mirror::StackBackend for X11StackBackend<'_> {
     type Error = RuntimeError;
     fn stack_above(&mut self, window: u32, sibling: u32) -> Result<(), RuntimeError> {
-        crate::window::stack_above(
+        match crate::window::stack_above(
             self.x11,
             xcb::x::Window::new(window),
             xcb::x::Window::new(sibling),
-        )?;
-        Ok(())
+        ) {
+            Ok(()) | Err(xcb::ProtocolError::X(xcb::x::Error::Window(_), _)) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
     fn stack_below(&mut self, window: u32, sibling: u32) -> Result<(), RuntimeError> {
-        crate::window::stack_below(
+        match crate::window::stack_below(
             self.x11,
             xcb::x::Window::new(window),
             xcb::x::Window::new(sibling),
-        )?;
-        Ok(())
+        ) {
+            Ok(()) | Err(xcb::ProtocolError::X(xcb::x::Error::Window(_), _)) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
