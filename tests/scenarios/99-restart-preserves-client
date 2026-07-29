@@ -37,6 +37,39 @@ poll_until 100 0.05 node_exists "$float" || fail "floating client lost after res
 poll_until 50 0.05 x_window_above "$float" "$tiled" \
 	|| fail "floating not above tiled after restart"
 
+# --- Exact within-level stacking order preserved across restart ---
+fa=$(add_test_window restart-fa ScenarioRestart)
+fb=$(add_test_window restart-fb ScenarioRestart)
+fc=$(add_test_window restart-fc ScenarioRestart)
+$BSPC node "$fa" --state floating
+$BSPC node "$fb" --state floating
+$BSPC node "$fc" --state floating
+# Focus order: fc, fb, fa -- each raise puts window on top of level.
+# Result: fa on top, fb below, fc at bottom.
+$BSPC node "$fc" --focus
+$BSPC node "$fb" --focus
+$BSPC node "$fa" --focus
+sleep 0.1
+
+# Verify pre-restart order: fa above fb above fc.
+x_window_above "$fa" "$fb" || fail "fa not above fb before restart"
+x_window_above "$fb" "$fc" || fail "fb not above fc before restart"
+
+$BSPC wm --restart
+poll_until 100 0.05 node_exists "$fa" || fail "fa lost after restart"
+poll_until 100 0.05 node_exists "$fb" || fail "fb lost after restart"
+poll_until 100 0.05 node_exists "$fc" || fail "fc lost after restart"
+
+# The exact within-level order must be preserved: fa above fb above fc.
+poll_until 50 0.05 x_window_above "$fa" "$fb" \
+	|| fail "within-level order not preserved: fa not above fb after restart"
+x_window_above "$fb" "$fc" \
+	|| fail "within-level order not preserved: fb not above fc after restart"
+
+close_test_window "$fc"
+close_test_window "$fb"
+close_test_window "$fa"
+
 # --- Transient relationship preserved across restart ---
 parent=$(add_controlled_window r-parent r-parent ScenarioRestart)
 child=$(add_controlled_window r-child r-child ScenarioRestart --transient-for "$parent")

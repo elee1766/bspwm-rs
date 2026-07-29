@@ -222,16 +222,17 @@ impl DaemonApp {
             }
         }
         self.refresh_colors(x11)?;
-        // Restack all visible desktops so the X server matches the restored
-        // model stacking order. Without this, windows appear in map order
-        // after restart instead of their saved stacking positions.
+        // Apply the restored stacking order to X. Walk bottom-to-top and
+        // stack each window above the previous one, reproducing the exact
+        // saved order rather than re-raising by level.
         {
-            let mut backend = super::monitors::X11StackBackend { x11 };
             let windows = self.state.stacking_order.windows();
-            for xid in &windows {
-                self.state
-                    .stacking_order
-                    .raise_in_level(&mut backend, *xid)?;
+            for pair in windows.windows(2) {
+                window::stack_above(
+                    x11,
+                    xcb::x::Window::new(pair[1]),
+                    xcb::x::Window::new(pair[0]),
+                )?;
             }
         }
         for monitor in self.world().monitor_order().to_vec() {

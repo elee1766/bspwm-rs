@@ -352,32 +352,8 @@ impl DaemonApp {
                     {
                         self.sync_window_state(x11, old)?;
                     }
-                    // Restack the previously focused node with focused=false
-                    // so it drops back to its unfocused position. Without this,
-                    // a tiled node raised during focus stays above floating
-                    // windows after focus moves to a floating window.
                     {
                         let mut backend = super::monitors::X11StackBackend { x11 };
-                        if let Some(old) = previous_node.filter(|old| Some(*old) != node)
-                            && self.world().tree.is_live(old)
-                        {
-                            if let Some(client) = self.client_of(old) {
-                                let old_xid = self.xid(old);
-                                let level = crate::stack::stack_level(client);
-                                if auto_raise || client.state != crate::types::ClientState::Floating
-                                {
-                                    self.state.stacking_order.set_level(
-                                        &mut backend,
-                                        old_xid,
-                                        level,
-                                        false,
-                                    )?;
-                                }
-                            }
-                            if let Some(old_desktop) = self.world().node_desktop(old) {
-                                self.sync_stacking_ewmh(x11, old_desktop)?;
-                            }
-                        }
                         if let Some(node) = node {
                             if let Some(client) = self.client_of(node) {
                                 let xid = self.xid(node);
