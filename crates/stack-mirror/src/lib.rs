@@ -766,6 +766,177 @@ mod tests {
     }
 
     #[test]
+    fn transient_survives_focus_of_other_windows() {
+        let backend = RecordBackend::default();
+        let mut mirror = StackMirror::new();
+        // Parent and child, both floating.
+        mirror.insert(&mut &backend, 100, 4).unwrap(); // parent
+        mirror.insert(&mut &backend, 200, 4).unwrap(); // child (transient)
+        mirror.insert(&mut &backend, 300, 4).unwrap(); // unrelated
+        mirror.set_transient(200, 100);
+
+        // Focus parent -- child should be above parent.
+        mirror.raise_in_level(&mut &backend, 100).unwrap();
+        let parent_pos = mirror.windows().iter().position(|&w| w == 100).unwrap();
+        let child_pos = mirror.windows().iter().position(|&w| w == 200).unwrap();
+        assert!(
+            child_pos > parent_pos,
+            "child must be above parent after focusing parent"
+        );
+
+        // Focus unrelated window -- child must still be above parent.
+        mirror.raise_in_level(&mut &backend, 300).unwrap();
+        let parent_pos = mirror.windows().iter().position(|&w| w == 100).unwrap();
+        let child_pos = mirror.windows().iter().position(|&w| w == 200).unwrap();
+        assert!(
+            child_pos > parent_pos,
+            "child must remain above parent after focusing unrelated window"
+        );
+
+        // Focus parent again -- child still above.
+        mirror.raise_in_level(&mut &backend, 100).unwrap();
+        let parent_pos = mirror.windows().iter().position(|&w| w == 100).unwrap();
+        let child_pos = mirror.windows().iter().position(|&w| w == 200).unwrap();
+        assert!(
+            child_pos > parent_pos,
+            "child must be above parent after re-focusing parent"
+        );
+    }
+
+    #[test]
+    fn transient_survives_lower_of_parent() {
+        let backend = RecordBackend::default();
+        let mut mirror = StackMirror::new();
+        mirror.insert(&mut &backend, 100, 4).unwrap();
+        mirror.insert(&mut &backend, 200, 4).unwrap();
+        mirror.set_transient(200, 100);
+
+        // Lower parent -- child must still be above parent.
+        mirror.lower_in_level(&mut &backend, 100).unwrap();
+        let parent_pos = mirror.windows().iter().position(|&w| w == 100).unwrap();
+        let child_pos = mirror.windows().iter().position(|&w| w == 200).unwrap();
+        assert!(
+            child_pos > parent_pos,
+            "child must be above parent even after parent is lowered"
+        );
+    }
+
+    #[test]
+    fn transient_chain_enforced() {
+        let backend = RecordBackend::default();
+        let mut mirror = StackMirror::new();
+        // grandparent -> parent -> child
+        mirror.insert(&mut &backend, 10, 4).unwrap();
+        mirror.insert(&mut &backend, 20, 4).unwrap();
+        mirror.insert(&mut &backend, 30, 4).unwrap();
+        mirror.set_transient(20, 10); // 20 transient for 10
+        mirror.set_transient(30, 20); // 30 transient for 20
+
+        // Focus grandparent (raises it to top, displacing 20 and 30).
+        mirror.raise_in_level(&mut &backend, 10).unwrap();
+        let gp = mirror.windows().iter().position(|&w| w == 10).unwrap();
+        let p = mirror.windows().iter().position(|&w| w == 20).unwrap();
+        let c = mirror.windows().iter().position(|&w| w == 30).unwrap();
+        assert!(p > gp, "parent above grandparent");
+        assert!(c > p, "child above parent");
+    }
+
+    #[test]
+    fn transient_cleared() {
+        let backend = RecordBackend::default();
+        let mut mirror = StackMirror::new();
+        mirror.insert(&mut &backend, 100, 4).unwrap();
+        mirror.insert(&mut &backend, 200, 4).unwrap();
+        mirror.set_transient(200, 100);
+
+        // Verify it's enforced.
+        mirror.raise_in_level(&mut &backend, 100).unwrap();
+        let parent_pos = mirror.windows().iter().position(|&w| w == 100).unwrap();
+        let child_pos = mirror.windows().iter().position(|&w| w == 200).unwrap();
+        assert!(child_pos > parent_pos);
+
+        // Clear the transient relationship.
+        mirror.clear_transient(200);
+
+        // Now raising parent should NOT pull child above it.
+        mirror.lower_in_level(&mut &backend, 200).unwrap();
+        mirror.raise_in_level(&mut &backend, 100).unwrap();
+        // 100 is at top, 200 is at bottom -- no enforcement.
+        assert_eq!(*mirror.windows().last().unwrap(), 100);
+        assert_eq!(mirror.windows()[0], 200);
+    }
+
+    #[test]
+    fn transient_with_mixed_levels() {
+        let backend = RecordBackend::default();
+        let mut mirror = StackMirror::new();
+        // Tiled parent, floating child (transient toolbar).
+        mirror.insert(&mut &backend, 10, 3).unwrap(); // tiled
+        mirror.insert(&mut &backend, 20, 4).unwrap(); // floating, transient for 10
+        mirror.insert(&mut &backend, 30, 4).unwrap(); // other floating
+        mirror.set_transient(20, 10);
+
+        // Child is already above parent (different levels).
+        let parent_pos = mirror.windows().iter().position(|&w| w == 10).unwrap();
+        let child_pos = mirror.windows().iter().position(|&w| w == 20).unwrap();
+        assert!(child_pos > parent_pos);
+
+        // Focus other floating -- child must remain above parent.
+        mirror.raise_in_level(&mut &backend, 30).unwrap();
+        let parent_pos = mirror.windows().iter().position(|&w| w == 10).unwrap();
+        let child_pos = mirror.windows().iter().position(|&w| w == 20).unwrap();
+        assert!(
+            child_pos > parent_pos,
+            "transient child stays above tiled parent"
+        );
+    }
+
+    #[test]
+    fn transient_remove_parent_clears_relationship() {
+        let backend = RecordBackend::default();
+        let mut mirror = StackMirror::new();
+        mirror.insert(&mut &backend, 100, 4).unwrap();
+        mirror.insert(&mut &backend, 200, 4).unwrap();
+        mirror.set_transient(200, 100);
+
+        // Remove parent.
+        mirror.remove(100);
+        // Child should still be in the mirror.
+        assert!(mirror.contains(200));
+        // Transient should be gone (parent no longer exists).
+        // Lowering child should work without panics.
+        mirror.lower_in_level(&mut &backend, 200).unwrap();
+    }
+
+    #[test]
+    fn multiple_transient_children() {
+        let backend = RecordBackend::default();
+        let mut mirror = StackMirror::new();
+        mirror.insert(&mut &backend, 100, 4).unwrap(); // parent
+        mirror.insert(&mut &backend, 201, 4).unwrap(); // child 1
+        mirror.insert(&mut &backend, 202, 4).unwrap(); // child 2
+        mirror.insert(&mut &backend, 300, 4).unwrap(); // unrelated
+        mirror.set_transient(201, 100);
+        mirror.set_transient(202, 100);
+
+        // Focus unrelated -- both children must stay above parent.
+        mirror.raise_in_level(&mut &backend, 300).unwrap();
+        let parent_pos = mirror.windows().iter().position(|&w| w == 100).unwrap();
+        let child1_pos = mirror.windows().iter().position(|&w| w == 201).unwrap();
+        let child2_pos = mirror.windows().iter().position(|&w| w == 202).unwrap();
+        assert!(child1_pos > parent_pos, "child 1 above parent");
+        assert!(child2_pos > parent_pos, "child 2 above parent");
+
+        // Focus parent -- both children still above.
+        mirror.raise_in_level(&mut &backend, 100).unwrap();
+        let parent_pos = mirror.windows().iter().position(|&w| w == 100).unwrap();
+        let child1_pos = mirror.windows().iter().position(|&w| w == 201).unwrap();
+        let child2_pos = mirror.windows().iter().position(|&w| w == 202).unwrap();
+        assert!(child1_pos > parent_pos, "child 1 above parent after focus");
+        assert!(child2_pos > parent_pos, "child 2 above parent after focus");
+    }
+
+    #[test]
     fn set_level_repositions() {
         let backend = RecordBackend::default();
         let mut mirror = StackMirror::new();
