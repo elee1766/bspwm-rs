@@ -614,6 +614,18 @@ impl XEventContext<'_> {
             let hints = window::normal_hints(self.x11, event.window())?;
             self.client_mut(node).size_hints = hints;
             self.app.arrange_desktop(self.x11, monitor, desktop)
+        } else if event.atom() == self.x11.atoms().net_wm_opaque_region {
+            // GTK4 sets _NET_WM_OPAQUE_REGION after mapping. If borderless_csd
+            // is on and the window now has CSD, remove its border.
+            if self.app.state.settings.borderless_csd
+                && self.client(node).border_width > 0
+                && ewmh::has_csd(self.x11, event.window())
+            {
+                self.client_mut(node).border_width = 0;
+                window::set_border_width(self.x11, event.window(), 0)?;
+                self.app.arrange_desktop(self.x11, monitor, desktop)?;
+            }
+            Ok(())
         } else {
             Ok(())
         }
