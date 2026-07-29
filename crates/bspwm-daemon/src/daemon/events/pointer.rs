@@ -249,8 +249,17 @@ impl XEventContext<'_> {
         let (window, point) = self.query_pointer()?;
         let policy = FocusPolicy::suppressed(&self.app.state, true, true);
         if let Some((monitor, desktop, node)) = self.app.managed_window(window.resource_id()) {
+            // Upstream compares against mon->desk->focus (the globally focused
+            // node), not the target desktop's focus. Without this, moving the
+            // pointer to a window on another monitor that already has its
+            // desktop's local focus won't switch global focus.
+            let globally_focused = self
+                .world()
+                .focused_monitor
+                .and_then(|m| self.world().monitor(m).active_desktop)
+                .and_then(|d| self.world().desktop(d).tree.focus);
             if self.world().monitor(monitor).active_desktop == Some(desktop)
-                && self.world().desktop(desktop).tree.focus != Some(node)
+                && globally_focused != Some(node)
             {
                 self.focus_with(monitor, desktop, Some(node), false, policy)?;
             }
