@@ -12,7 +12,6 @@ use crate::query::{
     ClientDto, CoordinatesDto, DesktopDto, MonitorDto, NodeDto, PreselDto, StateDto, SubscriberDto,
 };
 use crate::settings::Settings;
-use crate::stack::StackingOrder;
 use crate::tree::{Client, NodeId, Presel};
 use crate::world::{DesktopId, MonitorId, World};
 
@@ -46,7 +45,7 @@ pub struct RestoredSubscriber {
 pub struct RestoredState {
     pub world: World,
     pub history: History<MonitorId, DesktopId>,
-    pub stacking_order: StackingOrder,
+    pub stacking_order: stack_mirror::StackMirror,
     pub clients_count: u32,
     pub event_subscribers: Vec<RestoredSubscriber>,
 }
@@ -479,9 +478,12 @@ fn restore_history(world: &World, entries: Vec<CoordinatesDto>) -> History<Monit
     history
 }
 
-fn restore_stacking(world: &World, ids: Vec<u32>) -> Result<StackingOrder, RestoreError> {
-    let mut nodes = Vec::new();
+fn restore_stacking(
+    world: &World,
+    ids: Vec<u32>,
+) -> Result<stack_mirror::StackMirror, RestoreError> {
     let mut seen = HashSet::new();
+    let mut windows = Vec::new();
     for (index, external_id) in ids.into_iter().enumerate() {
         let node = world.roots().find_map(|(_, _, root)| {
             world
@@ -498,9 +500,20 @@ fn restore_stacking(world: &World, ids: Vec<u32>) -> Result<StackingOrder, Resto
                 format!("duplicate node id {external_id}"),
             ));
         }
-        nodes.push(node);
+        windows.push(external_id);
     }
-    Ok(StackingOrder::from_nodes(nodes))
+    Ok(stack_mirror::StackMirror::from_order(&windows, |xid| {
+        world
+            .roots()
+            .find_map(|(_, _, root)| {
+                world
+                    .tree
+                    .find_by_external_id(root, xid)
+                    .and_then(|node| world.tree.node(node).client.as_ref())
+                    .map(crate::stack::stack_level)
+            })
+            .unwrap_or(0)
+    }))
 }
 
 fn find_monitor(world: &World, external_id: u32) -> Option<MonitorId> {
@@ -521,6 +534,7 @@ mod tests {
     };
     use serde_json::Value;
 
+    #[allow(clippy::too_many_lines)]
     fn represented_state() -> DaemonState {
         let settings = Settings::default();
         let mut world = World::default();
@@ -619,9 +633,22 @@ mod tests {
             },
             true,
         );
-        let _ = state
-            .stacking_order
-            .stack(&state.world.tree, first, true, state.auto_raise);
+        {
+            struct Noop;
+            impl stack_mirror::StackBackend for Noop {
+                type Error = ();
+                fn stack_above(&mut self, _: u32, _: u32) -> Result<(), ()> {
+                    Ok(())
+                }
+                fn stack_below(&mut self, _: u32, _: u32) -> Result<(), ()> {
+                    Ok(())
+                }
+            }
+            let xid = state.world.tree.node(first).external_id;
+            let level =
+                crate::stack::stack_level(state.world.tree.node(first).client.as_ref().unwrap());
+            let _ = state.stacking_order.insert(&mut Noop, xid, level);
+        }
         state
     }
 
@@ -808,7 +835,7 @@ mod tests {
         let restored = restore_state(&dump.to_string(), &Settings::default()).unwrap();
         let restored = daemon_from_restored(restored);
         assert_eq!(restored.history.entries().len(), 2);
-        assert_eq!(restored.stacking_order.nodes().len(), 1);
+        assert_eq!(restored.stacking_order.len(), 1);
         assert_eq!(restored.validate(), Ok(()));
         assert_eq!(
             restored
@@ -834,8 +861,17 @@ mod tests {
         assert!(restored.world.monitor(monitor).active_desktop.is_some());
 
         let mut restored = restore_state(&query_state(&represented_state()), &settings).unwrap();
-        let old_client = restored.stacking_order.nodes()[0];
-        let old_client_xid = restored.world.tree.node(old_client).external_id;
+        let old_client_xid = restored.stacking_order.windows()[0];
+        let old_client = restored
+            .world
+            .roots()
+            .find_map(|(_, _, root)| {
+                restored
+                    .world
+                    .tree
+                    .find_by_external_id(root, old_client_xid)
+            })
+            .unwrap();
         let desktop = restored.world.monitor(monitor).desktops[0];
         let old_root = restored.world.desktop(desktop).tree.root.unwrap();
         let old_root_xid = restored.world.tree.node(old_root).external_id;
@@ -849,7 +885,7 @@ mod tests {
             old_client_xid
         );
         assert_ne!(restored.world.tree.node(old_root).external_id, old_root_xid);
-        assert_eq!(restored.stacking_order.nodes(), &[old_client]);
+        assert_eq!(restored.stacking_order.windows(), vec![old_client_xid]);
         assert!(
             restored
                 .history

@@ -484,13 +484,16 @@ impl XEventContext<'_> {
                 .handle_wm_moveresize(monitor, desktop, node, root_x, root_y, direction, button)?,
             events::EwmhClientMessage::RestackWindow => {
                 let focused = self.world().desktop(desktop).tree.focus == Some(node);
-                let actions = self.app.state.stacking_order.stack(
-                    &self.app.state.world.tree,
-                    node,
-                    focused,
-                    true, // always raise on explicit restack request
-                );
-                self.app.execute_restacks(self.x11, desktop, &actions)?;
+                if let Some(client) = self.client_of(node) {
+                    let xid = self.xid(node);
+                    let level = crate::stack::stack_level(client);
+                    let mut backend = crate::daemon::monitors::X11StackBackend { x11: self.x11 };
+                    self.app
+                        .state
+                        .stacking_order
+                        .set_level(&mut backend, xid, level, focused)?;
+                }
+                self.app.sync_stacking_ewmh(self.x11, desktop)?;
                 self.app.update_ewmh(self.x11)?;
             }
             events::EwmhClientMessage::CurrentDesktop { .. }
@@ -606,14 +609,16 @@ impl XEventContext<'_> {
             if new_parent != old_parent {
                 self.client_mut(node).transient_for = new_parent;
                 // Reconcile stacking so the child appears above its new parent.
-                let focused = self.world().desktop(desktop).tree.focus == Some(node);
-                let actions = self.app.state.stacking_order.stack(
-                    &self.app.state.world.tree,
-                    node,
-                    focused,
-                    self.app.state.auto_raise,
-                );
-                self.app.execute_restacks(self.x11, desktop, &actions)?;
+                if let Some(new_parent_xid) = new_parent {
+                    let child_xid = self.xid(node);
+                    let mut backend = crate::daemon::monitors::X11StackBackend { x11: self.x11 };
+                    self.app.state.stacking_order.enforce_transient(
+                        &mut backend,
+                        child_xid,
+                        new_parent_xid,
+                    )?;
+                }
+                self.app.sync_stacking_ewmh(self.x11, desktop)?;
                 self.app.update_ewmh(self.x11)?;
             }
             Ok(())

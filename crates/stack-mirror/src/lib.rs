@@ -28,7 +28,7 @@ pub trait StackBackend {
 ///
 /// The order is bottom-to-top: index 0 is the bottommost window,
 /// the last index is the topmost.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct StackMirror {
     /// Current order, bottom to top. Each entry is (window_xid, level).
     order: Vec<Entry>,

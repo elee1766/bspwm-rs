@@ -65,6 +65,7 @@ pub(super) fn node_geometry_status(
     )
 }
 
+#[cfg(test)]
 pub(super) fn node_stack_status(node: u32, relation: &str, sibling: u32) -> String {
     format!("node_stack 0x{node:08X} {relation} 0x{sibling:08X}\n")
 }

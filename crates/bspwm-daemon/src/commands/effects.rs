@@ -192,12 +192,7 @@ impl CommandHandler<'_> {
                 continue;
             }
             self.adapt_subtree_geometry(node, source_rectangle, destination_rectangle);
-            let _ = self.state.stacking_order.stack(
-                &self.state.world.tree,
-                node,
-                false,
-                self.state.auto_raise,
-            );
+            // Stacking will be reconciled by the Restack effect queued below.
             self.broadcast(
                 crate::types::SubscriberMask::NODE_TRANSFER,
                 format!(
@@ -611,10 +606,9 @@ impl CommandHandler<'_> {
                 .sticky_count
                 .saturating_add(sticky);
         }
-        let _ =
-            self.state
-                .stacking_order
-                .stack(&self.state.world.tree, node, false, policy.auto_raise);
+        // Insert/update the node in the stacking mirror at its new level.
+        // No X backend available in pure command layer; the Restack effect
+        // queued below will reconcile X state.
         if source_desktop != destination_desktop {
             if source_active && !destination_active {
                 self.state
@@ -687,9 +681,14 @@ impl CommandHandler<'_> {
         for root in &removal.roots {
             let count = self.state.world.tree.clients_count(*root);
             self.state.clients_count = self.state.clients_count.saturating_sub(count);
-            self.state
-                .stacking_order
-                .remove_subtree(&self.state.world.tree, *root);
+            // Remove all client leaves from the stacking mirror.
+            for leaf in self.state.world.tree.leaves(*root) {
+                if self.state.world.tree.node(leaf).client.is_some() {
+                    self.state
+                        .stacking_order
+                        .remove(self.state.world.tree.node(leaf).external_id);
+                }
+            }
             // The desktops that held these trees are gone, so nothing else will
             // ever reach them. Upstream `free`s them here too.
             self.state.world.tree.destroy_subtree(*root);

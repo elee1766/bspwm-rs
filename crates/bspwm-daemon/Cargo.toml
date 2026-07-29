@@ -12,6 +12,7 @@ name = "bspwm"
 bspwm-client = { version = "0.9.12", path = "../bspwm-client" }
 bspwm-core = { version = "0.9.12", path = "../bspwm-core" }
 bspwm-model = { version = "0.9.12", path = "../bspwm-model" }
+stack-mirror = { version = "0.1.0", path = "../stack-mirror" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2"

@@ -215,14 +215,33 @@ impl DaemonApp {
                     let focused = self.world().node_desktop(node).is_some_and(|desktop| {
                         self.world().desktop(desktop).tree.focus == Some(node)
                     });
-                    let actions = self.state.stacking_order.stack(
-                        &self.state.world.tree,
-                        node,
-                        focused,
-                        auto_raise,
-                    );
+                    if let Some(client) = self.client_of(node) {
+                        let xid = self.xid(node);
+                        let level = crate::stack::stack_level(client);
+                        let mut backend = super::monitors::X11StackBackend { x11 };
+                        if focused
+                            || auto_raise
+                            || client.state != crate::types::ClientState::Floating
+                        {
+                            if focused {
+                                self.state.stacking_order.set_level(
+                                    &mut backend,
+                                    xid,
+                                    level,
+                                    true,
+                                )?;
+                            } else {
+                                self.state.stacking_order.set_level(
+                                    &mut backend,
+                                    xid,
+                                    level,
+                                    false,
+                                )?;
+                            }
+                        }
+                    }
                     if let Some(desktop) = self.world().node_desktop(node) {
-                        self.execute_restacks(x11, desktop, &actions)?;
+                        self.sync_stacking_ewmh(x11, desktop)?;
                     }
                 }
                 CommandEffect::SyncEwmh => synced_ewmh = true,
@@ -337,26 +356,65 @@ impl DaemonApp {
                     // so it drops back to its unfocused position. Without this,
                     // a tiled node raised during focus stays above floating
                     // windows after focus moves to a floating window.
-                    if let Some(old) = previous_node.filter(|old| Some(*old) != node)
-                        && self.world().tree.is_live(old)
-                        && let Some(old_desktop) = self.world().node_desktop(old)
                     {
-                        let old_actions = self.state.stacking_order.stack(
-                            &self.state.world.tree,
-                            old,
-                            false,
-                            auto_raise,
-                        );
-                        self.execute_restacks(x11, old_desktop, &old_actions)?;
-                    }
-                    if let Some(node) = node {
-                        let actions = self.state.stacking_order.stack(
-                            &self.state.world.tree,
-                            node,
-                            true,
-                            auto_raise,
-                        );
-                        self.execute_restacks(x11, desktop, &actions)?;
+                        let mut backend = super::monitors::X11StackBackend { x11 };
+                        if let Some(old) = previous_node.filter(|old| Some(*old) != node)
+                            && self.world().tree.is_live(old)
+                        {
+                            if let Some(client) = self.client_of(old) {
+                                let old_xid = self.xid(old);
+                                let level = crate::stack::stack_level(client);
+                                if auto_raise || client.state != crate::types::ClientState::Floating
+                                {
+                                    self.state.stacking_order.set_level(
+                                        &mut backend,
+                                        old_xid,
+                                        level,
+                                        false,
+                                    )?;
+                                }
+                            }
+                            if let Some(old_desktop) = self.world().node_desktop(old) {
+                                self.sync_stacking_ewmh(x11, old_desktop)?;
+                            }
+                        }
+                        if let Some(node) = node {
+                            if let Some(client) = self.client_of(node) {
+                                let xid = self.xid(node);
+                                let level = crate::stack::stack_level(client);
+                                if auto_raise || client.state != crate::types::ClientState::Floating
+                                {
+                                    self.state.stacking_order.set_level(
+                                        &mut backend,
+                                        xid,
+                                        level,
+                                        true,
+                                    )?;
+                                }
+                                // Enforce transient-above-parent: any window
+                                // declaring this node as its WM_TRANSIENT_FOR
+                                // parent must be above it.
+                                let children: Vec<_> = self
+                                    .state
+                                    .stacking_order
+                                    .windows()
+                                    .iter()
+                                    .filter_map(|&w| {
+                                        let (_, _, n) = self.managed_window(w)?;
+                                        let c = self.node(n).client.as_ref()?;
+                                        (c.transient_for == Some(xid)).then_some(w)
+                                    })
+                                    .collect();
+                                for child in children {
+                                    self.state.stacking_order.enforce_transient(
+                                        &mut backend,
+                                        child,
+                                        xid,
+                                    )?;
+                                }
+                            }
+                            self.sync_stacking_ewmh(x11, desktop)?;
+                        }
                     }
                     let (desktop_mask, node_mask, verb) = if activate {
                         (

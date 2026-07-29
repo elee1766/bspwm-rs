@@ -960,9 +960,8 @@ impl CommandHandler<'_> {
                         self.state
                             .history
                             .remove_node(&self.state.world.tree, node, true);
-                        self.state
-                            .stacking_order
-                            .remove_subtree(&self.state.world.tree, node);
+                        // Receptacles have no client, so nothing to remove
+                        // from the stacking mirror.
                         self.state.world.tree.cancel_presel(node);
                         // Read before the free: the record names the receptacle
                         // that is about to stop existing.

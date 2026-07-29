@@ -60,9 +60,21 @@ fn fixture() -> DaemonState {
         },
         true,
     );
-    let _ = state
-        .stacking_order
-        .stack(&state.world.tree, left, true, state.auto_raise);
+    {
+        struct Noop;
+        impl stack_mirror::StackBackend for Noop {
+            type Error = ();
+            fn stack_above(&mut self, _: u32, _: u32) -> Result<(), ()> {
+                Ok(())
+            }
+            fn stack_below(&mut self, _: u32, _: u32) -> Result<(), ()> {
+                Ok(())
+            }
+        }
+        let xid = state.world.tree.node(left).external_id;
+        let level = crate::stack::stack_level(state.world.tree.node(left).client.as_ref().unwrap());
+        let _ = state.stacking_order.insert(&mut Noop, xid, level);
+    }
     state
 }
 

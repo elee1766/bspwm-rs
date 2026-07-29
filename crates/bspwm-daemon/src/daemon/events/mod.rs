@@ -274,14 +274,13 @@ impl XEventContext<'_> {
             if globally_focused == Some(node) {
                 // Upstream stacks the already-focused node on click under FFP.
                 if self.app.state.settings.focus_follows_pointer {
-                    let actions = self.app.state.stacking_order.stack(
-                        &self.app.state.world.tree,
-                        node,
-                        true,
-                        self.app.state.auto_raise,
-                    );
+                    let mut backend = super::monitors::X11StackBackend { x11: self.x11 };
+                    self.app
+                        .state
+                        .stacking_order
+                        .raise_in_level(&mut backend, self.xid(node))?;
                     if let Some(desktop_id) = self.app.world().node_desktop(node) {
-                        self.app.execute_restacks(self.x11, desktop_id, &actions)?;
+                        self.app.sync_stacking_ewmh(self.x11, desktop_id)?;
                     }
                 }
                 return Ok(false);
@@ -376,7 +375,10 @@ impl XEventContext<'_> {
             .tree()
             .feedback_windows()
             .contains(&window.resource_id());
-        for node in self.app.state.stacking_order.nodes().iter().rev().copied() {
+        for xid in self.app.state.stacking_order.windows().into_iter().rev() {
+            let Some((_, _, node)) = self.app.managed_window(xid) else {
+                continue;
+            };
             let value = self.node(node);
             let Some(client) = value.client.as_ref() else {
                 continue;
@@ -390,8 +392,8 @@ impl XEventContext<'_> {
                 client.tiled_rectangle
             };
             if crate::geometry::is_inside(point, rectangle) {
-                if value.external_id == window.resource_id() || is_feedback {
-                    return x::Window::new(value.external_id);
+                if xid == window.resource_id() || is_feedback {
+                    return x::Window::new(xid);
                 }
                 break;
             }

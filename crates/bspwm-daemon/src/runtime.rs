@@ -987,7 +987,7 @@ fn setup_ewmh(x11: &X11, meta_window: x::Window, state: &DaemonState) -> Result<
     ewmh::update_current_desktop(x11, &state.world)?;
     ewmh::update_client_desktops(x11, &state.world)?;
     ewmh::update_client_list(x11, &state.world)?;
-    ewmh::update_client_stacking_list(x11, &state.world, &state.stacking_order)?;
+    ewmh::update_client_stacking_list(x11, &state.stacking_order)?;
     ewmh::update_active_window(x11, &state.world)?;
     Ok(())
 }

@@ -4,15 +4,39 @@ use xcb::{Xid, XidNew, x};
 
 use super::DaemonApp;
 use super::action::XAction;
-use super::status::{node_geometry_status, node_stack_status};
+use super::status::node_geometry_status;
 use crate::arrange;
 use crate::ewmh;
 use crate::monitor::{self, ExistingMonitor, MonitorHandle, ReconcileSettings};
 use crate::runtime::RuntimeError;
-use crate::stack::RestackAction;
 use crate::types::{Rectangle, SubscriberMask};
 use crate::world::{DesktopId, MonitorId};
 use crate::x11::X11;
+
+/// [`stack_mirror::StackBackend`] that issues X11 stacking operations.
+pub(super) struct X11StackBackend<'a> {
+    pub x11: &'a X11,
+}
+
+impl stack_mirror::StackBackend for X11StackBackend<'_> {
+    type Error = RuntimeError;
+    fn stack_above(&mut self, window: u32, sibling: u32) -> Result<(), RuntimeError> {
+        crate::window::stack_above(
+            self.x11,
+            xcb::x::Window::new(window),
+            xcb::x::Window::new(sibling),
+        )?;
+        Ok(())
+    }
+    fn stack_below(&mut self, window: u32, sibling: u32) -> Result<(), RuntimeError> {
+        crate::window::stack_below(
+            self.x11,
+            xcb::x::Window::new(window),
+            xcb::x::Window::new(sibling),
+        )?;
+        Ok(())
+    }
+}
 
 impl DaemonApp {
     #[doc(hidden)]
@@ -95,28 +119,15 @@ impl DaemonApp {
         self.sync_presel_feedbacks(x11, monitor, desktop)
     }
 
-    pub(super) fn execute_restacks(
-        &mut self,
+    /// Updates the EWMH stacking list and restacks preselection feedbacks.
+    ///
+    /// Call after any operation that changes `state.stacking_order`.
+    pub(super) fn sync_stacking_ewmh(
+        &self,
         x11: &X11,
         desktop: DesktopId,
-        actions: &[RestackAction],
     ) -> Result<(), RuntimeError> {
-        if actions.is_empty() {
-            return Ok(());
-        }
-        for action in actions {
-            let Some(x_action) = self.restack_action(*action) else {
-                continue;
-            };
-            Self::execute_action(x11, x_action)?;
-            let (node, relation, sibling) = match *action {
-                RestackAction::Above { node, sibling } => (node, "above", sibling),
-                RestackAction::Below { node, sibling } => (node, "below", sibling),
-            };
-            let status = node_stack_status(self.xid(node), relation, self.xid(sibling));
-            self.publish(SubscriberMask::NODE_STACK, &status);
-        }
-        ewmh::update_client_stacking_list(x11, self.world(), &self.state.stacking_order)?;
+        ewmh::update_client_stacking_list(x11, &self.state.stacking_order)?;
         self.restack_presel_feedbacks(x11, desktop)
     }
 
@@ -347,9 +358,14 @@ impl DaemonApp {
                     self.state.history.remove_desktop(desktop);
                 }
                 for root in removed.roots {
-                    self.state
-                        .stacking_order
-                        .remove_subtree(&self.state.world.tree, root);
+                    // Remove all client leaves from the stacking mirror.
+                    for leaf in self.state.world.tree.leaves(root) {
+                        if self.state.world.tree.node(leaf).client.is_some() {
+                            self.state
+                                .stacking_order
+                                .remove(self.state.world.tree.node(leaf).external_id);
+                        }
+                    }
                     self.state.clients_count = self
                         .state
                         .clients_count

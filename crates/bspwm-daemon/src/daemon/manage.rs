@@ -521,14 +521,25 @@ impl DaemonApp {
             &self.state.settings,
             self.lock_masks,
         )?;
-        let focused = self.world().desktop(desktop).tree.focus == Some(node);
-        let actions = self.state.stacking_order.stack(
-            &self.state.world.tree,
-            node,
-            focused,
-            self.state.auto_raise,
-        );
-        self.execute_restacks(x11, desktop, &actions)?;
+        let stack_info = self.client_of(node).map(|client| {
+            (
+                self.xid(node),
+                crate::stack::stack_level(client),
+                client.transient_for,
+            )
+        });
+        if let Some((window_id, level, transient_for)) = stack_info {
+            let mut backend = super::monitors::X11StackBackend { x11 };
+            self.state
+                .stacking_order
+                .insert(&mut backend, window_id, level)?;
+            if let Some(parent_xid) = transient_for {
+                self.state
+                    .stacking_order
+                    .enforce_transient(&mut backend, window_id, parent_xid)?;
+            }
+        }
+        self.sync_stacking_ewmh(x11, desktop)?;
         self.sync_window_state(x11, node)?;
         self.refresh_colors(x11)?;
         self.update_ewmh(x11)?;
@@ -690,11 +701,8 @@ impl DaemonApp {
         // Clear stale transient-parent references so the XID cannot bind to
         // an unrelated future window.
         let orphans: Vec<_> = self
-            .state
-            .stacking_order
-            .nodes()
-            .iter()
-            .copied()
+            .all_client_nodes()
+            .into_iter()
             .filter(|n| {
                 self.state
                     .world
@@ -718,9 +726,14 @@ impl DaemonApp {
         self.state
             .history
             .remove_node(&self.state.world.tree, node, true);
-        self.state
-            .stacking_order
-            .remove_subtree(&self.state.world.tree, node);
+        // Remove all client leaves of this subtree from the stacking mirror.
+        for leaf in self.state.world.tree.leaves(node) {
+            if self.state.world.tree.node(leaf).client.is_some() {
+                self.state
+                    .stacking_order
+                    .remove(self.state.world.tree.node(leaf).external_id);
+            }
+        }
         self.tree_mut().cancel_presel(node);
         let mut tree_state = self.world().desktop(desktop).tree;
         let Ok(unlink_result) = self.tree_mut().unlink(&mut tree_state, node) else {
@@ -961,7 +974,7 @@ mod tests {
             assert_eq!(app.state.validate(), Ok(()));
         }
         assert!(app.state.history.entries().is_empty());
-        assert!(app.state.stacking_order.nodes().is_empty());
+        assert!(app.state.stacking_order.is_empty());
     }
 
     /// Filling a receptacle consumes it, and the branch `manage_window`

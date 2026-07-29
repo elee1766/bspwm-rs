@@ -6,8 +6,6 @@ use super::DaemonApp;
 use crate::arrange::ArrangeAction;
 use crate::events::SyntheticConfigurePlan;
 use crate::runtime::RuntimeError;
-use crate::stack::RestackAction;
-use crate::tree::NodeId;
 use crate::types::Rectangle;
 use crate::window;
 use crate::x11::X11;
@@ -62,21 +60,6 @@ impl DaemonApp {
             window: action.window,
             rectangle: action.rectangle,
             border_width: action.border_width,
-        }
-    }
-
-    #[must_use]
-    pub fn restack_action(&self, action: RestackAction) -> Option<XAction> {
-        let window_id = |node: NodeId| self.xid(node);
-        match action {
-            RestackAction::Above { node, sibling } => Some(XAction::StackAbove {
-                window: window_id(node),
-                sibling: window_id(sibling),
-            }),
-            RestackAction::Below { node, sibling } => Some(XAction::StackBelow {
-                window: window_id(node),
-                sibling: window_id(sibling),
-            }),
         }
     }
 
@@ -167,25 +150,13 @@ pub(super) fn set_wm_state_property(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::daemon::test_support::{app_with_desktop, manage_window};
 
     #[test]
-    fn arrange_and_restack_actions_translate_to_window_ids() {
+    fn arrange_actions_translate_to_window_ids() {
         let (mut app, _, desktop) = app_with_desktop();
-        let (_, _, first) = manage_window(&mut app, 10);
+        let (_, _, _first) = manage_window(&mut app, 10);
         let (_, _, second) = manage_window(&mut app, 20);
-        let action = RestackAction::Above {
-            node: second,
-            sibling: first,
-        };
-        assert_eq!(
-            app.restack_action(action),
-            Some(XAction::StackAbove {
-                window: 20,
-                sibling: 10
-            })
-        );
         assert_eq!(app.state.world.desktop(desktop).tree.focus, Some(second));
     }
 }

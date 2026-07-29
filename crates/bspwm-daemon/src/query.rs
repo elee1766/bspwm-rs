@@ -45,12 +45,7 @@ pub fn query_state(state: &DaemonState) -> String {
             .iter()
             .map(|entry| history_coordinates_dto(world, entry.location))
             .collect(),
-        stacking_list: state
-            .stacking_order
-            .nodes()
-            .iter()
-            .map(|node| world.tree.node(*node).external_id)
-            .collect(),
+        stacking_list: state.stacking_order.windows(),
         event_subscribers: Vec::new(),
     };
     serde_json::to_string(&dto).expect("daemon state should serialize as JSON")
@@ -569,9 +564,22 @@ mod tests {
             },
             true,
         );
-        let _ = daemon
-            .stacking_order
-            .stack(&daemon.world.tree, first, true, daemon.auto_raise);
+        {
+            struct Noop;
+            impl stack_mirror::StackBackend for Noop {
+                type Error = ();
+                fn stack_above(&mut self, _: u32, _: u32) -> Result<(), ()> {
+                    Ok(())
+                }
+                fn stack_below(&mut self, _: u32, _: u32) -> Result<(), ()> {
+                    Ok(())
+                }
+            }
+            let xid = daemon.world.tree.node(first).external_id;
+            let level =
+                crate::stack::stack_level(daemon.world.tree.node(first).client.as_ref().unwrap());
+            let _ = daemon.stacking_order.insert(&mut Noop, xid, level);
+        }
         let state = query_state(&daemon);
         let value: Value = serde_json::from_str(&state).unwrap();
         assert_eq!(value["focusedMonitorId"], 10);

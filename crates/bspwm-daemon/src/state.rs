@@ -3,10 +3,11 @@ use std::collections::{HashMap, HashSet};
 use crate::history::History;
 use crate::rule::RuleList;
 use crate::settings::Settings;
-use crate::stack::StackingOrder;
 use crate::tree::NodeId;
 use crate::types::Rectangle;
 use crate::world::{DesktopId, MonitorId, World};
+
+use stack_mirror::StackMirror;
 
 /// The focus-policy knobs one focus operation honours.
 ///
@@ -195,7 +196,7 @@ pub struct DaemonState {
     pub world: World,
     pub settings: Settings,
     pub history: History<MonitorId, DesktopId>,
-    pub stacking_order: StackingOrder,
+    pub stacking_order: StackMirror,
     pub rules: RuleList,
     pub clients_count: u32,
     pub auto_raise: bool,
@@ -243,7 +244,10 @@ impl DaemonState {
         }
         let retired = self.world.tree.take_retired_nodes();
         self.history.forget_nodes(&retired);
-        self.stacking_order.forget_nodes(&retired);
+        // StackMirror stores XIDs, not NodeIds. Client windows are removed from
+        // the mirror at their specific removal sites (forget_window,
+        // remove_subtree equivalents). Retired nodes here are branches and
+        // receptacles that were never in the stacking mirror.
     }
 
     /// Checks invariants spanning the independently implemented state stores.
@@ -326,12 +330,16 @@ impl DaemonState {
         }
 
         let mut stacked = HashSet::new();
-        for node in self.stacking_order.nodes() {
-            if !stacked.insert(*node) {
-                return Err("stacking order contains a duplicate node");
+        let client_xids: HashSet<u32> = client_nodes
+            .iter()
+            .map(|node| self.world.tree.node(*node).external_id)
+            .collect();
+        for xid in self.stacking_order.windows() {
+            if !stacked.insert(xid) {
+                return Err("stacking order contains a duplicate window");
             }
-            if !client_nodes.contains(node) {
-                return Err("stacking order contains a node without a managed client");
+            if !client_xids.contains(&xid) {
+                return Err("stacking order contains a window without a managed client");
             }
         }
 
@@ -345,7 +353,7 @@ impl Default for DaemonState {
             world: World::default(),
             settings: Settings::default(),
             history: History::default(),
-            stacking_order: StackingOrder::default(),
+            stacking_order: StackMirror::new(),
             rules: RuleList::default(),
             clients_count: 0,
             auto_raise: true,
@@ -390,6 +398,18 @@ mod tests {
     use crate::tree::Client;
     use crate::types::Rectangle;
 
+    /// No-op backend for unit tests that don't talk to X.
+    struct NoopBackend;
+    impl stack_mirror::StackBackend for NoopBackend {
+        type Error = ();
+        fn stack_above(&mut self, _window: u32, _sibling: u32) -> Result<(), ()> {
+            Ok(())
+        }
+        fn stack_below(&mut self, _window: u32, _sibling: u32) -> Result<(), ()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn init_matches_upstream_defaults() {
         let state = DaemonState::init();
@@ -428,9 +448,8 @@ mod tests {
             },
             true,
         );
-        let _ = state
-            .stacking_order
-            .stack(&state.world.tree, node, true, state.auto_raise);
+        let level = crate::stack::stack_level(state.world.tree.node(node).client.as_ref().unwrap());
+        let _ = state.stacking_order.insert(&mut NoopBackend, 3, level);
 
         assert_eq!(state.validate(), Ok(()));
         state.clients_count = 0;
