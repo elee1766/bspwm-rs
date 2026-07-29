@@ -207,8 +207,19 @@ impl DaemonApp {
                 }
             }
         }
-        for node in clients {
+        for node in clients.iter().copied() {
             self.sync_window_state(x11, node)?;
+        }
+        // Re-register transient relationships from the restored client state.
+        for &node in &clients {
+            if let Some(client) = self.client_of(node)
+                && let Some(parent_xid) = client.transient_for
+            {
+                let child_xid = self.xid(node);
+                self.state
+                    .stacking_order
+                    .set_transient(child_xid, parent_xid);
+            }
         }
         self.refresh_colors(x11)?;
         // Restack all visible desktops so the X server matches the restored
