@@ -422,7 +422,7 @@ impl DaemonApp {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn finish_scheduled_window(
         &mut self,
         x11: &X11,

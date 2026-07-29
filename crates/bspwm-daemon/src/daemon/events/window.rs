@@ -131,12 +131,13 @@ impl XEventContext<'_> {
             && destination_monitor != monitor
             && let Some(destination_desktop) =
                 self.world().monitor(destination_monitor).active_desktop
+            && self
+                .transfer_node(
+                    (monitor, desktop, node),
+                    (destination_monitor, destination_desktop),
+                )
+                .is_ok()
         {
-            self.transfer_node(
-                (monitor, desktop, node),
-                (destination_monitor, destination_desktop),
-            )
-            .map_err(|error| RuntimeError::X11(format!("moveresize transfer failed: {error:?}")))?;
             self.client_mut(node).floating_rectangle = rectangle;
             self.app.execute_pending_effects(self.x11)?;
         }
@@ -249,13 +250,28 @@ impl XEventContext<'_> {
             let mask = event.value_mask();
             if client.state == crate::types::ClientState::Floating {
                 let mut rectangle = client.floating_rectangle;
-                if mask.contains(x::ConfigWindowMask::X) {
-                    rectangle.x = i32::from(event.x())
-                        .wrapping_sub(i32::try_from(client.border_width).unwrap_or(i32::MAX));
-                }
-                if mask.contains(x::ConfigWindowMask::Y) {
-                    rectangle.y = i32::from(event.y())
-                        .wrapping_sub(i32::try_from(client.border_width).unwrap_or(i32::MAX));
+                let has_x = mask.contains(x::ConfigWindowMask::X);
+                let has_y = mask.contains(x::ConfigWindowMask::Y);
+                // Treat (0,0) and negative sentinel positions as "center me
+                // on my current monitor." (0,0) is the default from
+                // XCreateWindow when the client didn't specify coordinates,
+                // and (-1,-1) is a common sentinel meaning "no preference."
+                if has_x && has_y && event.x() <= 0 && event.y() <= 0 {
+                    let monitor_rect = self.world().monitor(monitor).rectangle;
+                    rectangle = window::center(
+                        rectangle,
+                        monitor_rect,
+                        u16::try_from(client.border_width).unwrap_or(u16::MAX),
+                    );
+                } else {
+                    if has_x {
+                        rectangle.x = i32::from(event.x())
+                            .wrapping_sub(i32::try_from(client.border_width).unwrap_or(i32::MAX));
+                    }
+                    if has_y {
+                        rectangle.y = i32::from(event.y())
+                            .wrapping_sub(i32::try_from(client.border_width).unwrap_or(i32::MAX));
+                    }
                 }
                 let (width, height) = requested_size(event, rectangle);
                 let (width, height) = crate::arrange::apply_size_hints(&client, width, height);
@@ -276,14 +292,13 @@ impl XEventContext<'_> {
                     && destination_monitor != monitor
                     && let Some(destination_desktop) =
                         self.world().monitor(destination_monitor).active_desktop
+                    && self
+                        .transfer_node(
+                            (monitor, desktop, node),
+                            (destination_monitor, destination_desktop),
+                        )
+                        .is_ok()
                 {
-                    self.transfer_node(
-                        (monitor, desktop, node),
-                        (destination_monitor, destination_desktop),
-                    )
-                    .map_err(|error| {
-                        RuntimeError::X11(format!("configure transfer failed: {error:?}"))
-                    })?;
                     // The client already supplied destination-relative geometry.
                     self.client_mut(node).floating_rectangle = rectangle;
                     self.app.execute_pending_effects(self.x11)?;

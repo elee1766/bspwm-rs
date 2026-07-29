@@ -333,6 +333,22 @@ impl DaemonApp {
                     {
                         self.sync_window_state(x11, old)?;
                     }
+                    // Restack the previously focused node with focused=false
+                    // so it drops back to its unfocused position. Without this,
+                    // a tiled node raised during focus stays above floating
+                    // windows after focus moves to a floating window.
+                    if let Some(old) = previous_node.filter(|old| Some(*old) != node)
+                        && self.world().tree.is_live(old)
+                        && let Some(old_desktop) = self.world().node_desktop(old)
+                    {
+                        let old_actions = self.state.stacking_order.stack(
+                            &self.state.world.tree,
+                            old,
+                            false,
+                            auto_raise,
+                        );
+                        self.execute_restacks(x11, old_desktop, &old_actions)?;
+                    }
                     if let Some(node) = node {
                         let actions = self.state.stacking_order.stack(
                             &self.state.world.tree,

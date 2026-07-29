@@ -463,10 +463,12 @@ impl XEventContext<'_> {
         });
         let anchor = self.world().desktop(destination_desktop).tree.focus;
         let split_ratio = self.app.state.settings.split_ratio;
-        let moved = self
-            .world_mut()
-            .transfer_node(grab.node, destination_desktop, anchor, split_ratio)
-            .map_err(|error| RuntimeError::X11(format!("pointer transfer failed: {error:?}")))?;
+        let Ok(moved) =
+            self.world_mut()
+                .transfer_node(grab.node, destination_desktop, anchor, split_ratio)
+        else {
+            return Ok(false);
+        };
         if adapt_geometry && let Some(client) = self.node_mut(grab.node).client.as_mut() {
             client.floating_rectangle = crate::window::adapt_geometry(
                 client.floating_rectangle,
@@ -650,11 +652,10 @@ impl XEventContext<'_> {
             if value
                 && self.world().monitor(monitor).active_desktop != Some(desktop)
                 && let Some(active) = self.world().monitor(monitor).active_desktop
+                && self
+                    .transfer_node((monitor, desktop, node), (monitor, active))
+                    .is_ok()
             {
-                self.transfer_node((monitor, desktop, node), (monitor, active))
-                    .map_err(|error| {
-                        RuntimeError::X11(format!("sticky transfer failed: {error:?}"))
-                    })?;
                 self.app.execute_pending_effects(self.x11)?;
             }
             if self

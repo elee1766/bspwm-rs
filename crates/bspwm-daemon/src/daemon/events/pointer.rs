@@ -148,11 +148,9 @@ impl XEventContext<'_> {
                             if target_monitor == grab.monitor && target_tiled {
                                 let source_id = self.xid(grab.node);
                                 let target_id = self.xid(target);
-                                self.world_mut().swap_nodes(grab.node, target).map_err(
-                                    |error| {
-                                        RuntimeError::X11(format!("pointer swap failed: {error:?}"))
-                                    },
-                                )?;
+                                if self.world_mut().swap_nodes(grab.node, target).is_err() {
+                                    return Ok(());
+                                }
                                 let status = format!(
                                     "node_swap {} {}\n",
                                     self.app.node_ids_raw(grab.monitor, grab.desktop, source_id),
