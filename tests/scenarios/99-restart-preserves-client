@@ -2,6 +2,7 @@
 set -u
 . "$TEST_ROOT/prelude"
 
+# --- Basic restart: client survives, socket preserved ---
 xid=$(add_test_window restart ScenarioRestart)
 socket_before=$($BSPC --print-socket-path)
 assert_eq "$BSPWM_SOCKET" "$socket_before" "socket path before restart"
@@ -12,4 +13,49 @@ socket_after=$($BSPC --print-socket-path)
 assert_eq "$BSPWM_SOCKET" "$socket_after" "socket path after restart"
 assert_eq "$socket_before" "$socket_after" "socket identity after restart"
 assert_eq ScenarioRestart "$($BSPC query -T -n "$xid" | jq -r '.client.className')" "client class after restart"
+
+# --- State preserved across restart ---
+$BSPC node "$xid" --state floating
+$BSPC node "$xid" --layer above
+$BSPC wm --restart
+poll_until 100 0.05 node_exists "$xid" || fail "client lost after second restart"
+assert_eq floating "$($BSPC query -T -n "$xid" | jq -r '.client.state')" "floating state after restart"
+assert_eq above "$($BSPC query -T -n "$xid" | jq -r '.client.layer')" "above layer after restart"
+
+# --- Stacking order preserved: tiled below floating ---
+$BSPC node "$xid" --state tiled --layer normal
+tiled=$(add_test_window restart-tiled ScenarioRestart)
+float=$(add_test_window restart-float ScenarioRestart)
+$BSPC node "$float" --state floating
+$BSPC node "$tiled" --focus
+sleep 0.1
+
+$BSPC wm --restart
+poll_until 100 0.05 node_exists "$tiled" || fail "tiled client lost after restart"
+poll_until 100 0.05 node_exists "$float" || fail "floating client lost after restart"
+# After restart, floating must be above tiled in X stack.
+poll_until 50 0.05 x_window_above "$float" "$tiled" \
+	|| fail "floating not above tiled after restart"
+
+# --- Transient relationship preserved across restart ---
+parent=$(add_controlled_window r-parent r-parent ScenarioRestart)
+child=$(add_controlled_window r-child r-child ScenarioRestart --transient-for "$parent")
+$BSPC node "$parent" --state floating
+$BSPC node "$child" --state floating
+$BSPC node "$parent" --focus
+poll_until 50 0.05 x_window_above "$child" "$parent" \
+	|| fail "transient child not above parent before restart"
+
+$BSPC wm --restart
+poll_until 100 0.05 node_exists "$parent" || fail "parent lost after restart"
+poll_until 100 0.05 node_exists "$child" || fail "child lost after restart"
+# Re-focus parent after restart -- child must still be above.
+$BSPC node "$parent" --focus
+poll_until 50 0.05 x_window_above "$child" "$parent" \
+	|| fail "transient child not above parent after restart"
+
+close_test_window "$child"
+close_test_window "$parent"
+close_test_window "$float"
+close_test_window "$tiled"
 close_test_window "$xid"
