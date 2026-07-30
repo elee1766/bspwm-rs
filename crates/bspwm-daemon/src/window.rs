@@ -21,7 +21,19 @@ pub struct WindowGeometry {
     pub rectangle: Rectangle,
     pub border_width: u16,
     pub depth: u8,
+    #[allow(clippy::default_trait_access)]
     pub root: x::Window,
+}
+
+impl Default for WindowGeometry {
+    fn default() -> Self {
+        Self {
+            rectangle: Rectangle::default(),
+            border_width: 0,
+            depth: 0,
+            root: x::Window::none(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -138,33 +150,54 @@ pub fn rule_properties(x11: &X11, window: x::Window) -> xcb::Result<RuleWindowPr
         .wait_for_reply(geometry_cookie)
         .map(|reply| geometry_from_reply(&reply));
 
-    let attributes = attributes?;
-    let class = class?;
+    // Upstream tolerates NULL replies from GetWindowAttributes (the window
+    // may have been destroyed between MapRequest and our query). Treat a
+    // failed attributes query as non-override-redirect with defaults.
+    let Ok(attributes) = attributes else {
+        return Ok(RuleWindowProperties {
+            override_redirect: false,
+            identity: WindowProperties::new(String::new(), String::new(), String::new()),
+            builtin: BuiltinRuleProperties::default(),
+            size_hints: SizeHints::default(),
+            geometry: geometry.unwrap_or_else(|_| WindowGeometry::default()),
+            icccm: IcccmProps::default(),
+            urgent: false,
+            wm_flags: WmFlags::default(),
+            user_time: None,
+            user_time_window: None,
+            startup_id: None,
+            sync_request_counter: None,
+            transient_for: None,
+        });
+    };
+    let class = class.unwrap_or_default();
     let mut class_fields = class.split(|byte| *byte == 0);
     let instance_name = lossy(class_fields.next().unwrap_or_default());
     let class_name = lossy(class_fields.next().unwrap_or_default());
-    let net_name = net_name?;
-    let wm_name = wm_name?;
+    let net_name = net_name.unwrap_or_default();
+    let wm_name = wm_name.unwrap_or_default();
     let name = if net_name.is_empty() {
         lossy(trim_nul(&wm_name))
     } else {
         lossy(trim_nul(&net_name))
     };
-    let window_types = window_types?;
-    let window_states = window_states?;
-    let protocols = protocols?;
-    let wm_hints = parse_wm_hints(&wm_hint_values?);
+    let window_types = window_types.unwrap_or_default();
+    let window_states = window_states.unwrap_or_default();
+    let protocols = protocols.unwrap_or_default();
+    let wm_hints = parse_wm_hints(&wm_hint_values.unwrap_or_default());
     let wm_flags = crate::ewmh::wm_flags_from_ids(&window_states, atoms);
-    let transient_for = transient_values?
+    let transient_for = transient_values
+        .unwrap_or_default()
         .first()
         .copied()
         .filter(|id| *id != x::WINDOW_NONE.resource_id())
         .filter(|id| *id != window.resource_id());
     let transient = transient_for.is_some();
-    let size_hints = parse_size_hints(&hints?);
-    let geometry = geometry?;
-    let direct_user_time = direct_user_time?.first().copied();
-    let user_time_window = user_time_window?
+    let size_hints = parse_size_hints(&hints.unwrap_or_default());
+    let geometry = geometry.unwrap_or_else(|_| WindowGeometry::default());
+    let direct_user_time = direct_user_time.unwrap_or_default().first().copied();
+    let user_time_window = user_time_window
+        .unwrap_or_default()
         .first()
         .copied()
         .filter(|value| *value != x::WINDOW_NONE.resource_id());
@@ -181,7 +214,7 @@ pub fn rule_properties(x11: &X11, window: x::Window) -> xcb::Result<RuleWindowPr
             .and_then(|values| values.first().copied())
         })
         .or(direct_user_time);
-    let startup_id = startup_id?;
+    let startup_id = startup_id.unwrap_or_default();
     let startup_id = (!startup_id.is_empty()).then(|| lossy(trim_nul(&startup_id)));
     let sync_request_counter = protocols
         .contains(&atoms.net_wm_sync_request.resource_id())
