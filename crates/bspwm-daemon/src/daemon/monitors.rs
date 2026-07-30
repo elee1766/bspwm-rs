@@ -13,12 +13,12 @@ use crate::types::{Rectangle, SubscriberMask};
 use crate::world::{DesktopId, MonitorId};
 use crate::x11::X11;
 
-/// [`stack_mirror::StackBackend`] that issues X11 stacking operations.
+/// [`bspwm_xstack::StackBackend`] that issues X11 stacking operations.
 pub(super) struct X11StackBackend<'a> {
     pub x11: &'a X11,
 }
 
-impl stack_mirror::StackBackend for X11StackBackend<'_> {
+impl bspwm_xstack::StackBackend for X11StackBackend<'_> {
     type Error = RuntimeError;
     fn stack_above(&mut self, window: u32, sibling: u32) -> Result<(), RuntimeError> {
         match crate::window::stack_above(

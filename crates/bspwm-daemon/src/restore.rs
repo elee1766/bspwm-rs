@@ -45,7 +45,7 @@ pub struct RestoredSubscriber {
 pub struct RestoredState {
     pub world: World,
     pub history: History<MonitorId, DesktopId>,
-    pub stacking_order: stack_mirror::StackMirror,
+    pub stacking_order: bspwm_xstack::StackMirror,
     pub clients_count: u32,
     pub event_subscribers: Vec<RestoredSubscriber>,
 }
@@ -481,7 +481,7 @@ fn restore_history(world: &World, entries: Vec<CoordinatesDto>) -> History<Monit
 fn restore_stacking(
     world: &World,
     ids: Vec<u32>,
-) -> Result<stack_mirror::StackMirror, RestoreError> {
+) -> Result<bspwm_xstack::StackMirror, RestoreError> {
     let mut seen = HashSet::new();
     let mut windows = Vec::new();
     for (index, external_id) in ids.into_iter().enumerate() {
@@ -502,7 +502,7 @@ fn restore_stacking(
         }
         windows.push(external_id);
     }
-    Ok(stack_mirror::StackMirror::from_order(&windows, |xid| {
+    Ok(bspwm_xstack::StackMirror::from_order(&windows, |xid| {
         world
             .roots()
             .find_map(|(_, _, root)| {
@@ -635,7 +635,7 @@ mod tests {
         );
         {
             struct Noop;
-            impl stack_mirror::StackBackend for Noop {
+            impl bspwm_xstack::StackBackend for Noop {
                 type Error = ();
                 fn stack_above(&mut self, _: u32, _: u32) -> Result<(), ()> {
                     Ok(())

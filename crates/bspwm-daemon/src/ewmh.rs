@@ -460,7 +460,7 @@ pub fn client_list_payload(world: &World) -> Vec<u32> {
 
 /// Builds `_NET_CLIENT_LIST_STACKING` from bottom to top.
 #[must_use]
-pub fn client_stacking_payload(stacking: &stack_mirror::StackMirror) -> Vec<u32> {
+pub fn client_stacking_payload(stacking: &bspwm_xstack::StackMirror) -> Vec<u32> {
     stacking.windows()
 }
 
@@ -488,7 +488,7 @@ pub fn update_client_list(x11: &X11, world: &World) -> xcb::ProtocolResult<()> {
 /// Returns an X protocol error if the checked property request fails.
 pub fn update_client_stacking_list(
     x11: &X11,
-    stacking: &stack_mirror::StackMirror,
+    stacking: &bspwm_xstack::StackMirror,
 ) -> xcb::ProtocolResult<()> {
     let windows: Vec<_> = client_stacking_payload(stacking)
         .into_iter()
@@ -765,7 +765,7 @@ mod tests {
     #[test]
     fn client_payload_uses_leaf_order_and_active_window_requires_a_client() {
         struct Noop;
-        impl stack_mirror::StackBackend for Noop {
+        impl bspwm_xstack::StackBackend for Noop {
             type Error = ();
             fn stack_above(&mut self, _: u32, _: u32) -> Result<(), ()> {
                 Ok(())
@@ -777,7 +777,7 @@ mod tests {
 
         let (mut world, [left, _], [one, _, _], [first, second]) = sample_world();
         assert_eq!(client_list_payload(&world), [0x100, 0x200]);
-        let mut stacking = stack_mirror::StackMirror::new();
+        let mut stacking = bspwm_xstack::StackMirror::new();
         let _ = stacking.insert(&mut Noop, 0x200, 3);
         let _ = stacking.insert(&mut Noop, 0x100, 3);
         assert_eq!(client_stacking_payload(&stacking), [0x200, 0x100]);

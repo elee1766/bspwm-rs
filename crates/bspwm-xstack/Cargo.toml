@@ -1,5 +1,5 @@
 [package]
-name = "stack-mirror"
+name = "bspwm-xstack"
 version = "0.1.0"
 edition = "2024"
 license = "BSD-2-Clause"

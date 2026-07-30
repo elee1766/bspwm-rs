@@ -7,7 +7,7 @@ use crate::tree::NodeId;
 use crate::types::Rectangle;
 use crate::world::{DesktopId, MonitorId, World};
 
-use stack_mirror::StackMirror;
+use bspwm_xstack::StackMirror;
 
 /// The focus-policy knobs one focus operation honours.
 ///
@@ -400,7 +400,7 @@ mod tests {
 
     /// No-op backend for unit tests that don't talk to X.
     struct NoopBackend;
-    impl stack_mirror::StackBackend for NoopBackend {
+    impl bspwm_xstack::StackBackend for NoopBackend {
         type Error = ();
         fn stack_above(&mut self, _window: u32, _sibling: u32) -> Result<(), ()> {
             Ok(())

@@ -566,7 +566,7 @@ mod tests {
         );
         {
             struct Noop;
-            impl stack_mirror::StackBackend for Noop {
+            impl bspwm_xstack::StackBackend for Noop {
                 type Error = ();
                 fn stack_above(&mut self, _: u32, _: u32) -> Result<(), ()> {
                     Ok(())
