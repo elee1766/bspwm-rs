@@ -767,7 +767,17 @@ impl<A: RuntimeApp> Runtime<A> {
                     Err(error @ xcb::Error::Protocol(_)) => Err(error),
                 };
                 did_work = true;
-                self.app.handle_event(item, &self.x11)?;
+                match self.app.handle_event(item, &self.x11) {
+                    Ok(()) => {}
+                    Err(RuntimeError::Protocol(ref error)) => {
+                        // Checked protocol errors from event handlers are
+                        // non-fatal. Upstream bspwm continues after all X
+                        // errors; crashing over a rejected request tears
+                        // down every client's session unnecessarily.
+                        log::warn!("protocol error during event handling: {error}");
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             if let Err(error) = self.x11.check_connection() {
                 self.app.request_stop();
@@ -849,12 +859,16 @@ impl<A: RuntimeApp> Runtime<A> {
             match result {
                 Ok((outcome, response)) => {
                     if let Err(error) = self.app.execute_pending_effects(&self.x11) {
-                        if let MessageOutcome::Subscribe(subscription) = &outcome
-                            && let Some(path) = &subscription.fifo_path
-                        {
-                            let _ = fs::remove_file(path);
+                        if let RuntimeError::Protocol(ref proto) = error {
+                            log::warn!("protocol error during effects: {proto}");
+                        } else {
+                            if let MessageOutcome::Subscribe(subscription) = &outcome
+                                && let Some(path) = &subscription.fifo_path
+                            {
+                                let _ = fs::remove_file(path);
+                            }
+                            return Err(error);
                         }
-                        return Err(error);
                     }
                     match outcome {
                         MessageOutcome::Close(control) => {
