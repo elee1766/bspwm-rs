@@ -196,12 +196,21 @@ impl XEventContext<'_> {
         Ok(())
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     pub(super) fn on_map_request(
         &mut self,
         event: &x::MapRequestEvent,
     ) -> Result<(), RuntimeError> {
         let id = event.window().resource_id();
-        let _ = self.app.schedule_window(self.x11, id)?;
+        if let Err(error) = self.app.schedule_window(self.x11, id) {
+            // If management fails (e.g. BadWindow because the window died),
+            // still try to map it so the client isn't left hanging. The map
+            // will harmlessly fail if the window is already gone.
+            log::warn!("schedule_window failed for 0x{id:08X}: {error}");
+            let _ = self.x11.send_and_check_request(&x::MapWindow {
+                window: event.window(),
+            });
+        }
         Ok(())
     }
 
