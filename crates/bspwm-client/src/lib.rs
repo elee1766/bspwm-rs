@@ -36,18 +36,25 @@ pub fn parse_display(value: &str) -> Option<Display> {
     })
 }
 
+/// Expands `{host}`, `{display}`, and `{screen}` placeholders in a path
+/// template using the given display information.
+#[must_use]
+pub fn expand_path_template(template: &str, display: &Display) -> PathBuf {
+    PathBuf::from(
+        template
+            .replace("{host}", &display.host)
+            .replace("{display}", &display.display.to_string())
+            .replace("{screen}", &display.screen.to_string()),
+    )
+}
+
 #[must_use]
 pub fn socket_path_from_env() -> Option<PathBuf> {
     if let Some(path) = env::var_os(SOCKET_ENV_VAR) {
         return Some(PathBuf::from(path));
     }
     let display = parse_display(&env::var("DISPLAY").ok()?)?;
-    Some(PathBuf::from(
-        SOCKET_PATH_TEMPLATE
-            .replace("{host}", &display.host)
-            .replace("{display}", &display.display.to_string())
-            .replace("{screen}", &display.screen.to_string()),
-    ))
+    Some(expand_path_template(SOCKET_PATH_TEMPLATE, &display))
 }
 
 #[must_use]

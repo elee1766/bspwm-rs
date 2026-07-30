@@ -15,19 +15,10 @@ use std::io::Read;
 
 pub const RUNTIME_DIR_ENV: &str = "XDG_RUNTIME_DIR";
 
-/// Reads a file without imposing UTF-8 on its contents.
-///
-/// # Errors
-///
-/// Returns the underlying filesystem error if the file cannot be read.
-pub fn read_string(file_path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
-    fs::read(file_path)
-}
-
 /// Copies at most `len` bytes, the Rust equivalent of the useful portion of
-/// upstream's NUL-terminated `copy_string` result.
+/// upstream's NUL-terminated `copy_bytes` result.
 #[must_use]
-pub fn copy_string(value: impl AsRef<[u8]>, len: usize) -> Vec<u8> {
+pub fn copy_bytes(value: impl AsRef<[u8]>, len: usize) -> Vec<u8> {
     let value = value.as_ref();
     value[..len.min(value.len())].to_vec()
 }
@@ -54,9 +45,10 @@ fn mktempfifo_in(runtime_dir: &Path, template: &str) -> io::Result<PathBuf> {
         )
     })?;
 
+    let mut urandom = fs::File::open("/dev/urandom")?;
     for _ in 0..100 {
         let mut random = [0_u8; 6];
-        fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+        urandom.read_exact(&mut random)?;
         let suffix: String = random
             .into_iter()
             .map(|byte| {
@@ -159,22 +151,10 @@ mod tests {
     use std::os::unix::fs::FileTypeExt;
 
     #[test]
-    fn reads_all_file_bytes_and_reports_missing_files() {
-        let path = isolated_path("read-string");
-        fs::write(&path, b"abc\0\xff").unwrap();
-        assert_eq!(read_string(&path).unwrap(), b"abc\0\xff");
-        fs::remove_file(&path).unwrap();
-        assert_eq!(
-            read_string(&path).unwrap_err().kind(),
-            io::ErrorKind::NotFound
-        );
-    }
-
-    #[test]
     fn copies_only_available_requested_bytes() {
-        assert_eq!(copy_string("abcdef", 3), b"abc");
-        assert_eq!(copy_string("abc", 8), b"abc");
-        assert_eq!(copy_string("abc", 0), b"");
+        assert_eq!(copy_bytes("abcdef", 3), b"abc");
+        assert_eq!(copy_bytes("abc", 8), b"abc");
+        assert_eq!(copy_bytes("abc", 0), b"");
     }
 
     #[test]

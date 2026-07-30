@@ -450,23 +450,24 @@ pub fn update_client_desktops(x11: &X11, world: &World) -> xcb::ProtocolResult<(
 
 /// Builds `_NET_CLIENT_LIST` in monitor, desktop, then leaf order.
 #[must_use]
-pub fn client_list_payload(world: &World) -> Vec<u32> {
+pub fn client_list_payload(world: &World) -> Vec<x::Window> {
     world
         .roots()
         .flat_map(|(_, _, root)| {
-            client_leaves(world, root).map(|node| world.tree.node(node).external_id)
+            client_leaves(world, root)
+                .map(|node| x::Window::new(world.tree.node(node).external_id))
         })
         .collect()
 }
 
 /// Builds `_NET_CLIENT_LIST_STACKING` from bottom to top.
 #[must_use]
-pub fn client_stacking_payload(world: &World, stacking: &StackingOrder) -> Vec<u32> {
+pub fn client_stacking_payload(world: &World, stacking: &StackingOrder) -> Vec<x::Window> {
     stacking
         .nodes()
         .iter()
         .filter(|node| world.tree.node(**node).client.is_some())
-        .map(|node| world.tree.node(*node).external_id)
+        .map(|node| x::Window::new(world.tree.node(*node).external_id))
         .collect()
 }
 
@@ -475,10 +476,7 @@ pub fn client_stacking_payload(world: &World, stacking: &StackingOrder) -> Vec<u
 /// # Errors
 /// Returns an X protocol error if the checked property request fails.
 pub fn update_client_list(x11: &X11, world: &World) -> xcb::ProtocolResult<()> {
-    let windows: Vec<_> = client_list_payload(world)
-        .into_iter()
-        .map(x::Window::new)
-        .collect();
+    let windows = client_list_payload(world);
     set_property(
         x11,
         x11.root(),
@@ -497,10 +495,7 @@ pub fn update_client_stacking_list(
     world: &World,
     stacking: &StackingOrder,
 ) -> xcb::ProtocolResult<()> {
-    let windows: Vec<_> = client_stacking_payload(world, stacking)
-        .into_iter()
-        .map(x::Window::new)
-        .collect();
+    let windows = client_stacking_payload(world, stacking);
     set_property(
         x11,
         x11.root(),
@@ -772,11 +767,17 @@ mod tests {
     #[test]
     fn client_payload_uses_leaf_order_and_active_window_requires_a_client() {
         let (mut world, [left, _], [one, _, _], [first, second]) = sample_world();
-        assert_eq!(client_list_payload(&world), [0x100, 0x200]);
+        assert_eq!(
+            client_list_payload(&world),
+            [x::Window::new(0x100), x::Window::new(0x200)]
+        );
         let mut stacking = StackingOrder::default();
         let _ = stacking.stack(&world.tree, second, true, true);
         let _ = stacking.stack(&world.tree, first, true, true);
-        assert_eq!(client_stacking_payload(&world, &stacking), [0x200, 0x100]);
+        assert_eq!(
+            client_stacking_payload(&world, &stacking),
+            [x::Window::new(0x200), x::Window::new(0x100)]
+        );
         world.focused_monitor = Some(left);
         world.monitor_mut(left).active_desktop = Some(one);
         world.desktop_mut(one).tree.focus = Some(first);

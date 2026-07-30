@@ -211,11 +211,6 @@ pub struct DaemonState {
 }
 
 impl DaemonState {
-    #[must_use]
-    pub fn init() -> Self {
-        Self::default()
-    }
-
     pub fn set_record_history(&mut self, record_history: bool) {
         self.record_history = record_history;
         self.history.recording = record_history;
@@ -392,7 +387,7 @@ mod tests {
 
     #[test]
     fn init_matches_upstream_defaults() {
-        let state = DaemonState::init();
+        let state = DaemonState::default();
         assert_eq!(state.clients_count, 0);
         assert!(state.auto_raise);
         assert!(state.sticky_still);
