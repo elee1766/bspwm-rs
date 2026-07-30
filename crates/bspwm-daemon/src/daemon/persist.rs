@@ -268,7 +268,7 @@ impl DaemonApp {
                     field,
                     subscriber.count,
                 ),
-                report.as_bytes(),
+                &report,
             )?;
         }
         Ok(())
@@ -328,7 +328,7 @@ impl DaemonApp {
         let report = print_report(self.world(), &self.state.settings);
         self.subscribers.add_subscriber(
             make_subscriber(output, fifo_path, subscription.mask, subscription.count),
-            report.as_bytes(),
+            &report,
         )?;
         Ok(())
     }

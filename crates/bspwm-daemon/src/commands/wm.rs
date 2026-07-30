@@ -85,7 +85,7 @@ impl CommandHandler<'_> {
                 }
                 WmCommand::GetStatus => {
                     rsp.write_all(
-                        print_report(&self.state.world, &self.state.settings).as_bytes(),
+                        &print_report(&self.state.world, &self.state.settings),
                     )?;
                 }
                 WmCommand::RecordHistory { enabled } => {

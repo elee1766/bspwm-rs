@@ -45,7 +45,7 @@ impl DaemonApp {
             return;
         }
         let report = print_report(self.world(), &self.state.settings);
-        self.subscribers.put_status(mask, status, report.as_bytes());
+        self.subscribers.put_status(mask, status, &report);
     }
 
     pub(super) fn broadcast_report(&mut self) {

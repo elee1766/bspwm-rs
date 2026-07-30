@@ -1,4 +1,3 @@
-use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -231,69 +230,75 @@ fn remove_fifo<W>(subscriber: &Subscriber<W>) {
 }
 
 #[must_use]
-pub fn print_report(world: &World, settings: &Settings) -> String {
-    let mut report = settings.status_prefix.clone();
+pub fn print_report(world: &World, settings: &Settings) -> Vec<u8> {
+    let mut report = Vec::from(settings.status_prefix.as_bytes());
     for (monitor_index, monitor_id) in world.monitor_order().iter().copied().enumerate() {
         let monitor = world.monitor(monitor_id);
         let monitor_char = if world.focused_monitor == Some(monitor_id) {
-            'M'
+            b'M'
         } else {
-            'm'
+            b'm'
         };
-        let _ = write!(report, "{}{}", monitor_char, monitor.name);
+        report.push(monitor_char);
+        report.extend_from_slice(monitor.name.as_bytes());
         for desktop_id in &monitor.desktops {
             let desktop = world.desktop(*desktop_id);
             let urgent = world.desktop_is_urgent(*desktop_id);
             let mut state = if urgent {
-                'u'
+                b'u'
             } else if desktop.tree.root.is_none() {
-                'f'
+                b'f'
             } else {
-                'o'
+                b'o'
             };
             if monitor.active_desktop == Some(*desktop_id) {
                 state = state.to_ascii_uppercase();
             }
-            let _ = write!(report, ":{}{}", state, desktop.name);
+            report.push(b':');
+            report.push(state);
+            report.extend_from_slice(desktop.name.as_bytes());
         }
         if let Some(desktop_id) = monitor.active_desktop {
             let desktop = world.desktop(desktop_id);
             let layout_char = match desktop.layout {
-                Layout::Tiled => 'T',
-                Layout::Monocle => 'M',
+                Layout::Tiled => b'T',
+                Layout::Monocle => b'M',
             };
-            let _ = write!(report, ":L{layout_char}");
+            report.extend_from_slice(b":L");
+            report.push(layout_char);
             if let Some(node_id) = desktop.tree.focus {
                 let node = world.tree.node(node_id);
                 let state_char = node
                     .client
                     .as_ref()
-                    .map_or('@', |client| match client.state {
-                        ClientState::Tiled => 'T',
-                        ClientState::PseudoTiled => 'P',
-                        ClientState::Floating => 'F',
-                        ClientState::Fullscreen => '=',
+                    .map_or(b'@', |client| match client.state {
+                        ClientState::Tiled => b'T',
+                        ClientState::PseudoTiled => b'P',
+                        ClientState::Floating => b'F',
+                        ClientState::Fullscreen => b'=',
                     });
-                let _ = write!(report, ":T{state_char}:G");
+                report.extend_from_slice(b":T");
+                report.push(state_char);
+                report.extend_from_slice(b":G");
                 if node.sticky {
-                    report.push('S');
+                    report.push(b'S');
                 }
                 if node.private {
-                    report.push('P');
+                    report.push(b'P');
                 }
                 if node.locked {
-                    report.push('L');
+                    report.push(b'L');
                 }
                 if node.marked {
-                    report.push('M');
+                    report.push(b'M');
                 }
             }
         }
         if monitor_index + 1 < world.monitor_order().len() {
-            report.push(':');
+            report.push(b':');
         }
     }
-    report.push('\n');
+    report.push(b'\n');
     report
 }
 
@@ -343,7 +348,7 @@ mod tests {
         world.tree.node_mut(node).client = Some(Client::from_settings(&settings));
         world.desktop_mut(desktop).tree.root = Some(node);
         world.desktop_mut(desktop).tree.focus = Some(node);
-        assert_eq!(print_report(&world, &settings), "WMone:OI:LT:TT:G\n");
+        assert_eq!(print_report(&world, &settings), b"WMone:OI:LT:TT:G\n");
     }
 
     #[test]
