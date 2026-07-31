@@ -220,6 +220,13 @@ impl XEventContext<'_> {
     ) -> Result<(), RuntimeError> {
         self.cancel_grab_for_window(event.window().resource_id())?;
         let location = self.app.forget_window(event.window().resource_id());
+        let mut backend = crate::daemon::monitors::X11StackBackend::new(self.x11);
+        let result = self
+            .app
+            .state
+            .stacking_order
+            .reconcile(&mut backend);
+        self.app.complete_stack_operation(backend, result)?;
         self.arrange_and_publish(location)
     }
 
@@ -243,6 +250,13 @@ impl XEventContext<'_> {
         set_wm_state_property(self.x11, event.window(), 0)?;
         self.cancel_grab_for_window(event.window().resource_id())?;
         let location = self.app.forget_window(event.window().resource_id());
+        let mut backend = crate::daemon::monitors::X11StackBackend::new(self.x11);
+        let result = self
+            .app
+            .state
+            .stacking_order
+            .reconcile(&mut backend);
+        self.app.complete_stack_operation(backend, result)?;
         self.arrange_and_publish(location)
     }
 
@@ -484,13 +498,20 @@ impl XEventContext<'_> {
                 .handle_wm_moveresize(monitor, desktop, node, root_x, root_y, direction, button)?,
             events::EwmhClientMessage::RestackWindow => {
                 let focused = self.world().desktop(desktop).tree.focus == Some(node);
-                let actions = self.app.state.stacking_order.stack(
-                    &self.app.state.world.tree,
-                    node,
-                    focused,
-                    true, // always raise on explicit restack request
-                );
-                self.app.execute_restacks(self.x11, desktop, &actions)?;
+                if let Some(client) = self.client_of(node)
+                    && crate::stack::stacking_enabled(client, self.app.state.auto_raise)
+                {
+                    let xid = self.xid(node);
+                    let level = crate::stack::stack_level(client);
+                    let mut backend = crate::daemon::monitors::X11StackBackend::new(self.x11);
+                    let result = self
+                        .app
+                        .state
+                        .stacking_order
+                        .set_level(&mut backend, xid, level, focused);
+                    self.app.complete_stack_operation(backend, result)?;
+                }
+                self.app.sync_stacking_ewmh(self.x11, desktop)?;
                 self.app.update_ewmh(self.x11)?;
             }
             events::EwmhClientMessage::CurrentDesktop { .. }
@@ -604,16 +625,28 @@ impl XEventContext<'_> {
                 .filter(|id| *id != event.window().resource_id());
             let old_parent = self.client(node).transient_for;
             if new_parent != old_parent {
-                self.client_mut(node).transient_for = new_parent;
-                // Reconcile stacking so the child appears above its new parent.
-                let focused = self.world().desktop(desktop).tree.focus == Some(node);
-                let actions = self.app.state.stacking_order.stack(
-                    &self.app.state.world.tree,
-                    node,
-                    focused,
-                    self.app.state.auto_raise,
-                );
-                self.app.execute_restacks(self.x11, desktop, &actions)?;
+                let child_xid = self.xid(node);
+                let mut backend = crate::daemon::monitors::X11StackBackend::new(self.x11);
+                let result = if let Some(parent_xid) = new_parent {
+                    self.app
+                        .state
+                        .stacking_order
+                        .set_transient(&mut backend, child_xid, parent_xid)
+                } else {
+                    self.app
+                        .state
+                        .stacking_order
+                        .clear_transient(&mut backend, child_xid)
+                };
+                let result = self.app.complete_stack_operation(backend, result);
+                let retained_parent = self
+                    .app
+                    .state
+                    .stacking_order
+                    .transient_parent(child_xid);
+                self.client_mut(node).transient_for = retained_parent;
+                result?;
+                self.app.sync_stacking_ewmh(self.x11, desktop)?;
                 self.app.update_ewmh(self.x11)?;
             }
             Ok(())

@@ -2,7 +2,6 @@
 
 use crate::query::Coordinates;
 use crate::settings::Settings;
-use crate::stack::StackingOrder;
 use crate::tree::NodeId;
 use crate::types::{ClientState, MAXLEN, StateTransitions, WmFlags};
 use crate::window::set_property;
@@ -462,12 +461,11 @@ pub fn client_list_payload(world: &World) -> Vec<x::Window> {
 
 /// Builds `_NET_CLIENT_LIST_STACKING` from bottom to top.
 #[must_use]
-pub fn client_stacking_payload(world: &World, stacking: &StackingOrder) -> Vec<x::Window> {
+pub fn client_stacking_payload(stacking: &bspwm_xstack::StackMirror) -> Vec<x::Window> {
     stacking
-        .nodes()
-        .iter()
-        .filter(|node| world.tree.node(**node).client.is_some())
-        .map(|node| x::Window::new(world.tree.node(*node).external_id))
+        .windows()
+        .into_iter()
+        .map(x::Window::new)
         .collect()
 }
 
@@ -492,10 +490,9 @@ pub fn update_client_list(x11: &X11, world: &World) -> xcb::ProtocolResult<()> {
 /// Returns an X protocol error if the checked property request fails.
 pub fn update_client_stacking_list(
     x11: &X11,
-    world: &World,
-    stacking: &StackingOrder,
+    stacking: &bspwm_xstack::StackMirror,
 ) -> xcb::ProtocolResult<()> {
-    let windows = client_stacking_payload(world, stacking);
+    let windows = client_stacking_payload(stacking);
     set_property(
         x11,
         x11.root(),
@@ -766,16 +763,27 @@ mod tests {
 
     #[test]
     fn client_payload_uses_leaf_order_and_active_window_requires_a_client() {
+        struct Noop;
+        impl bspwm_xstack::StackBackend for Noop {
+            type Error = ();
+            fn stack_above(&mut self, _: u32, _: u32) -> Result<(), ()> {
+                Ok(())
+            }
+            fn stack_below(&mut self, _: u32, _: u32) -> Result<(), ()> {
+                Ok(())
+            }
+        }
+
         let (mut world, [left, _], [one, _, _], [first, second]) = sample_world();
         assert_eq!(
             client_list_payload(&world),
             [x::Window::new(0x100), x::Window::new(0x200)]
         );
-        let mut stacking = StackingOrder::default();
-        let _ = stacking.stack(&world.tree, second, true, true);
-        let _ = stacking.stack(&world.tree, first, true, true);
+        let mut stacking = bspwm_xstack::StackMirror::new();
+        let _ = stacking.insert(&mut Noop, 0x200, 3);
+        let _ = stacking.insert(&mut Noop, 0x100, 3);
         assert_eq!(
-            client_stacking_payload(&world, &stacking),
+            client_stacking_payload(&stacking),
             [x::Window::new(0x200), x::Window::new(0x100)]
         );
         world.focused_monitor = Some(left);

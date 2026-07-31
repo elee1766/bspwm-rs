@@ -207,25 +207,31 @@ impl DaemonApp {
                 }
             }
         }
-        for node in clients {
+        for node in clients.iter().copied() {
             self.sync_window_state(x11, node)?;
         }
-        self.refresh_colors(x11)?;
-        // Restack all visible desktops so the X server matches the restored
-        // model stacking order. Without this, windows appear in map order
-        // after restart instead of their saved stacking positions.
-        for monitor in self.world().monitor_order().to_vec() {
-            if let Some(desktop) = self.world().monitor(monitor).active_desktop
-                && let Some(root) = self.world().desktop(desktop).tree.root
+        // Re-register transient relationships from the restored client state.
+        for &node in &clients {
+            if let Some(client) = self.client_of(node)
+                && let Some(parent_xid) = client.transient_for
             {
-                let focused = self.world().desktop(desktop).tree.focus;
-                let actions = self.state.stacking_order.stack(
-                    &self.state.world.tree,
-                    root,
-                    focused.is_some(),
-                    self.state.auto_raise,
+                let child_xid = self.xid(node);
+                let mut backend = super::monitors::X11StackBackend::new(x11);
+                let result = self.state.stacking_order.set_transient(
+                    &mut backend,
+                    child_xid,
+                    parent_xid,
                 );
-                self.execute_restacks(x11, desktop, &actions)?;
+                self.complete_stack_operation(backend, result)?;
+            }
+        }
+        let mut backend = super::monitors::X11StackBackend::new(x11);
+        let result = self.state.stacking_order.reconcile(&mut backend);
+        self.complete_stack_operation(backend, result)?;
+        self.refresh_colors(x11)?;
+        for monitor in self.world().monitor_order().to_vec() {
+            if let Some(desktop) = self.world().monitor(monitor).active_desktop {
+                self.sync_stacking_ewmh(x11, desktop)?;
             }
         }
         self.update_ewmh(x11)?;

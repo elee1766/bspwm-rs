@@ -14,6 +14,29 @@ $BSPC node "$parent" --focus
 poll_until 50 0.05 x_window_above "$child" "$parent" \
 	|| fail "transient child is not above parent after focusing parent"
 
+# --- Child must stay above parent when OTHER windows are focused ---
+other1=$(add_test_window t-other1 ScenarioTransient)
+$BSPC node "$other1" --state floating
+other2=$(add_test_window t-other2 ScenarioTransient)
+$BSPC node "$other2" --state floating
+
+# Focus several other windows in sequence.
+$BSPC node "$other1" --focus
+sleep 0.1
+$BSPC node "$other2" --focus
+sleep 0.1
+$BSPC node "$other1" --focus
+sleep 0.1
+
+# Child must STILL be above parent after focusing unrelated windows.
+x_window_above "$child" "$parent" \
+	|| fail "transient child fell below parent after focusing other windows"
+
+# Focus parent again -- child must be above parent.
+$BSPC node "$parent" --focus
+poll_until 50 0.05 x_window_above "$child" "$parent" \
+	|| fail "transient child not above parent after re-focusing parent"
+
 # --- Changing WM_TRANSIENT_FOR clears the relationship ---
 send_window_command t-child transient-for none
 sleep 0.2
@@ -22,15 +45,12 @@ sleep 0.2
 send_window_command t-child transient-for "$parent"
 sleep 0.2
 
-# After re-establishing, focusing parent should raise child above parent.
-# Put another window in between to verify the raise actually moves things.
-other=$(add_test_window t-other ScenarioTransient)
-$BSPC node "$other" --state floating
-$BSPC node "$other" --focus
+$BSPC node "$other1" --focus
 $BSPC node "$parent" --focus
 poll_until 50 0.05 x_window_above "$child" "$parent" \
 	|| fail "transient child not above parent after re-establishing and focusing parent"
 
-close_test_window "$other"
+close_test_window "$other2"
+close_test_window "$other1"
 close_test_window "$child"
 close_test_window "$parent"

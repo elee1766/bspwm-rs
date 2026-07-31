@@ -16,18 +16,19 @@ impl DaemonApp {
     /// The window of the topmost tiled client, which preselection feedback
     /// windows are stacked directly above.
     fn topmost_tiled_window(&self) -> Option<x::Window> {
-        let node = self
+        let xid = self
             .state
             .stacking_order
-            .nodes()
-            .iter()
+            .windows()
+            .into_iter()
             .rev()
-            .copied()
-            .find(|node| {
-                self.client_of(*node)
-                    .is_some_and(|client| client.state.is_tiled())
+            .find(|xid| {
+                self.managed_window(*xid).is_some_and(|(_, _, node)| {
+                    self.client_of(node)
+                        .is_some_and(|client| client.state.is_tiled())
+                })
             })?;
-        Some(x::Window::new(self.xid(node)))
+        Some(x::Window::new(xid))
     }
 
     pub(super) fn restack_presel_feedbacks(

@@ -9,12 +9,84 @@ use crate::arrange;
 use crate::ewmh;
 use crate::monitor::{self, ExistingMonitor, MonitorHandle, ReconcileSettings};
 use crate::runtime::RuntimeError;
-use crate::stack::RestackAction;
 use crate::types::{Rectangle, SubscriberMask};
 use crate::world::{DesktopId, MonitorId};
 use crate::x11::X11;
 
+/// [`bspwm_xstack::StackBackend`] that issues X11 stacking operations.
+pub(super) struct X11StackBackend<'a> {
+    pub x11: &'a X11,
+    operations: Vec<bspwm_xstack::StackOp>,
+}
+
+impl<'a> X11StackBackend<'a> {
+    pub(super) const fn new(x11: &'a X11) -> Self {
+        Self {
+            x11,
+            operations: Vec::new(),
+        }
+    }
+
+    pub(super) fn into_operations(self) -> Vec<bspwm_xstack::StackOp> {
+        self.operations
+    }
+}
+
+impl bspwm_xstack::StackBackend for X11StackBackend<'_> {
+    type Error = RuntimeError;
+    fn stack_above(&mut self, window: u32, sibling: u32) -> Result<(), RuntimeError> {
+        match crate::window::stack_above(
+            self.x11,
+            xcb::x::Window::new(window),
+            xcb::x::Window::new(sibling),
+        ) {
+            Ok(()) => {
+                self.operations
+                    .push(bspwm_xstack::StackOp::Above { window, sibling });
+                Ok(())
+            }
+            Err(xcb::ProtocolError::X(xcb::x::Error::Window(_), _)) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+    fn stack_below(&mut self, window: u32, sibling: u32) -> Result<(), RuntimeError> {
+        match crate::window::stack_below(
+            self.x11,
+            xcb::x::Window::new(window),
+            xcb::x::Window::new(sibling),
+        ) {
+            Ok(()) => {
+                self.operations
+                    .push(bspwm_xstack::StackOp::Below { window, sibling });
+                Ok(())
+            }
+            Err(xcb::ProtocolError::X(xcb::x::Error::Window(_), _)) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
 impl DaemonApp {
+    pub(super) fn complete_stack_operation<T>(
+        &mut self,
+        backend: X11StackBackend<'_>,
+        result: Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        self.publish_stack_operations(&backend.into_operations());
+        result
+    }
+
+    pub(super) fn publish_stack_operations(&mut self, operations: &[bspwm_xstack::StackOp]) {
+        for operation in operations {
+            let (window, relation, sibling) = match *operation {
+                bspwm_xstack::StackOp::Above { window, sibling } => (window, "above", sibling),
+                bspwm_xstack::StackOp::Below { window, sibling } => (window, "below", sibling),
+            };
+            let status = node_stack_status(window, relation, sibling);
+            self.publish(SubscriberMask::NODE_STACK, &status);
+        }
+    }
+
     #[doc(hidden)]
     pub fn arrange_desktop(
         &mut self,
@@ -95,28 +167,15 @@ impl DaemonApp {
         self.sync_presel_feedbacks(x11, monitor, desktop)
     }
 
-    pub(super) fn execute_restacks(
-        &mut self,
+    /// Updates the EWMH stacking list and restacks preselection feedbacks.
+    ///
+    /// Call after any operation that changes `state.stacking_order`.
+    pub(super) fn sync_stacking_ewmh(
+        &self,
         x11: &X11,
         desktop: DesktopId,
-        actions: &[RestackAction],
     ) -> Result<(), RuntimeError> {
-        if actions.is_empty() {
-            return Ok(());
-        }
-        for action in actions {
-            let Some(x_action) = self.restack_action(*action) else {
-                continue;
-            };
-            Self::execute_action(x11, x_action)?;
-            let (node, relation, sibling) = match *action {
-                RestackAction::Above { node, sibling } => (node, "above", sibling),
-                RestackAction::Below { node, sibling } => (node, "below", sibling),
-            };
-            let status = node_stack_status(self.xid(node), relation, self.xid(sibling));
-            self.publish(SubscriberMask::NODE_STACK, &status);
-        }
-        ewmh::update_client_stacking_list(x11, self.world(), &self.state.stacking_order)?;
+        ewmh::update_client_stacking_list(x11, &self.state.stacking_order)?;
         self.restack_presel_feedbacks(x11, desktop)
     }
 
@@ -339,6 +398,20 @@ impl DaemonApp {
             let external_id = self.world().monitor(source).external_id;
             let root_id = self.world().monitor(source).root_id;
             if let Some(removed) = self.world_mut().remove_monitor_runtime(source) {
+                let removed_windows: Vec<_> = removed
+                    .roots
+                    .iter()
+                    .flat_map(|root| self.state.world.tree.leaves(*root))
+                    .filter_map(|node| {
+                        self.state
+                            .world
+                            .tree
+                            .node(node)
+                            .client
+                            .as_ref()
+                            .map(|_| self.state.world.tree.node(node).external_id)
+                    })
+                    .collect();
                 // The desktop slots are already freed, so the removal hands the
                 // external ids over rather than leaving them to be looked up.
                 for (desktop, desktop_id) in removed.desktops {
@@ -347,15 +420,33 @@ impl DaemonApp {
                     self.state.history.remove_desktop(desktop);
                 }
                 for root in removed.roots {
-                    self.state
-                        .stacking_order
-                        .remove_subtree(&self.state.world.tree, root);
+                    // Remove all client leaves from the stacking mirror.
+                    for leaf in self.state.world.tree.leaves(root) {
+                        if self.state.world.tree.node(leaf).client.is_some() {
+                            self.state
+                                .stacking_order
+                                .remove(self.state.world.tree.node(leaf).external_id);
+                        }
+                    }
                     self.state.clients_count = self
                         .state
                         .clients_count
                         .saturating_sub(self.tree().clients_count(root));
                     self.tree_mut().destroy_subtree(root);
                 }
+                let surviving_clients = self.all_client_nodes();
+                for node in surviving_clients {
+                    if self
+                        .client_of(node)
+                        .and_then(|client| client.transient_for)
+                        .is_some_and(|parent| removed_windows.contains(&parent))
+                    {
+                        self.client_mut(node).transient_for = None;
+                    }
+                }
+                let mut backend = X11StackBackend::new(x11);
+                let result = self.state.stacking_order.reconcile(&mut backend);
+                self.complete_stack_operation(backend, result)?;
                 self.state.forget_retired_nodes();
                 if let Some(root) = root_id {
                     monitor::destroy_monitor_root(x11, root)?;

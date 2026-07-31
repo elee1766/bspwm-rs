@@ -459,7 +459,7 @@ impl DaemonApp {
         ewmh::update_current_desktop(x11, self.world())?;
         ewmh::update_client_desktops(x11, self.world())?;
         ewmh::update_client_list(x11, self.world())?;
-        ewmh::update_client_stacking_list(x11, self.world(), &self.state.stacking_order)?;
+        ewmh::update_client_stacking_list(x11, &self.state.stacking_order)?;
         if self.state.settings.enable_ewmh_allowed_actions {
             self.refresh_ewmh_allowed_actions(x11)?;
         }
