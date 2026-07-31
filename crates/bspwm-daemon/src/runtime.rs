@@ -34,7 +34,7 @@ pub use bspwm_ipc::{SocketListener, UnixResponse, receive_request};
 use crate::common::state_path_from_env;
 use crate::ewmh;
 use crate::messages::{
-    MessageControl, MessageHandler, MessageOutcome, Response, Subscription, handle_message,
+    MessageControl, MessageHandler, MessageOutcome, Subscription, handle_message,
 };
 use crate::state::DaemonState;
 use crate::x11::{ConnectError, X11};
@@ -234,12 +234,6 @@ pub enum RuntimeError {
     Protocol(#[from] xcb::ProtocolError),
     #[error("X11 runtime error: {0}")]
     Connection(#[from] xcb::ConnError),
-}
-
-impl Response for UnixResponse {
-    fn close(&mut self) -> io::Result<()> {
-        UnixResponse::close(self)
-    }
 }
 
 pub fn handle_stream<H: MessageHandler>(
@@ -783,6 +777,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crate::messages::Response;
 
     #[derive(Default)]
     struct TestHandler {

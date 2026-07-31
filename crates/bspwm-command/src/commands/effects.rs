@@ -51,7 +51,7 @@ impl CommandHandler<'_> {
         });
     }
 
-    pub(crate) fn set_node_state(
+    pub fn set_node_state(
         &mut self,
         monitor: crate::world::MonitorId,
         desktop: crate::world::DesktopId,
@@ -291,7 +291,7 @@ impl CommandHandler<'_> {
     }
 
     /// [`Self::focus_location_with`] under the user's configured focus policy.
-    pub(crate) fn focus_location(&mut self, target: Coordinates, activate: bool) -> bool {
+    pub fn focus_location(&mut self, target: Coordinates, activate: bool) -> bool {
         self.focus_location_with(target, activate, FocusPolicy::configured(self.state))
     }
 
@@ -301,7 +301,7 @@ impl CommandHandler<'_> {
     /// pass a suppressed policy instead of temporarily clearing the persisted
     /// settings the policy is read from.
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn focus_location_with(
+    pub fn focus_location_with(
         &mut self,
         target: Coordinates,
         activate: bool,
@@ -503,7 +503,9 @@ impl CommandHandler<'_> {
     }
 
     /// [`Self::transfer_node_complete_with`] under the configured focus policy.
-    pub(crate) fn transfer_node_complete(
+    /// # Errors
+    /// Returns an error when the requested structural move is invalid.
+    pub fn transfer_node_complete(
         &mut self,
         source: Coordinates,
         destination: Coordinates,

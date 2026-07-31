@@ -36,7 +36,7 @@ impl CommandHandler<'_> {
     }
 
     /// Resolves placement descriptors in the same priority order as upstream.
-    pub(crate) fn resolve_rule_target(&mut self, consequence: &RuleConsequence) -> Coordinates {
+    pub fn resolve_rule_target(&mut self, consequence: &RuleConsequence) -> Coordinates {
         let reference = self.reference();
         if !consequence.node_desc.is_empty()
             && let Resolve::Ok(location) =
@@ -83,7 +83,7 @@ impl CommandHandler<'_> {
 
     /// Replaces valid rule placement selectors with the concrete IDs passed to
     /// an external rule command. Invalid selectors become empty, as upstream.
-    pub(crate) fn resolve_rule_consequence(&mut self, consequence: &mut RuleConsequence) {
+    pub fn resolve_rule_consequence(&mut self, consequence: &mut RuleConsequence) {
         let reference = self.reference();
         let monitor = match self.resolve_monitor(consequence.monitor_desc.as_bytes(), reference) {
             Resolve::Ok(location) => location.monitor,

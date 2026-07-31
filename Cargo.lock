@@ -81,6 +81,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bspwm-command"
+version = "0.9.12"
+dependencies = [
+ "bspwm-core",
+ "bspwm-ipc",
+ "bspwm-model",
+ "bspwm-state",
+ "bspwm-xstack",
+ "thiserror",
+]
+
+[[package]]
 name = "bspwm-core"
 version = "0.9.12"
 dependencies = [
@@ -94,6 +106,7 @@ name = "bspwm-daemon"
 version = "0.9.12"
 dependencies = [
  "bspwm-client",
+ "bspwm-command",
  "bspwm-core",
  "bspwm-ipc",
  "bspwm-model",

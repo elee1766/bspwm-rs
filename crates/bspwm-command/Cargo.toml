@@ -1,0 +1,23 @@
+[package]
+name = "bspwm-command"
+version = "0.9.12"
+edition = "2024"
+license = "BSD-2-Clause"
+description = "Command protocol, message handling, and subscriptions for bspwm-rs"
+
+[dependencies]
+bspwm-core = { version = "0.9.12", path = "../bspwm-core" }
+bspwm-ipc = { version = "0.9.12", path = "../bspwm-ipc" }
+bspwm-model = { version = "0.9.12", path = "../bspwm-model" }
+bspwm-state = { version = "0.9.12", path = "../bspwm-state" }
+thiserror = "2"
+
+[dev-dependencies]
+bspwm-xstack = { version = "0.1.0", path = "../bspwm-xstack" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
