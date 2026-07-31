@@ -449,19 +449,24 @@ pub fn update_client_desktops(x11: &X11, world: &World) -> xcb::ProtocolResult<(
 
 /// Builds `_NET_CLIENT_LIST` in monitor, desktop, then leaf order.
 #[must_use]
-pub fn client_list_payload(world: &World) -> Vec<u32> {
+pub fn client_list_payload(world: &World) -> Vec<x::Window> {
     world
         .roots()
         .flat_map(|(_, _, root)| {
-            client_leaves(world, root).map(|node| world.tree.node(node).external_id)
+            client_leaves(world, root)
+                .map(|node| x::Window::new(world.tree.node(node).external_id))
         })
         .collect()
 }
 
 /// Builds `_NET_CLIENT_LIST_STACKING` from bottom to top.
 #[must_use]
-pub fn client_stacking_payload(stacking: &bspwm_xstack::StackMirror) -> Vec<u32> {
-    stacking.windows()
+pub fn client_stacking_payload(stacking: &bspwm_xstack::StackMirror) -> Vec<x::Window> {
+    stacking
+        .windows()
+        .into_iter()
+        .map(x::Window::new)
+        .collect()
 }
 
 /// Writes `_NET_CLIENT_LIST` on the root window.
@@ -469,10 +474,7 @@ pub fn client_stacking_payload(stacking: &bspwm_xstack::StackMirror) -> Vec<u32>
 /// # Errors
 /// Returns an X protocol error if the checked property request fails.
 pub fn update_client_list(x11: &X11, world: &World) -> xcb::ProtocolResult<()> {
-    let windows: Vec<_> = client_list_payload(world)
-        .into_iter()
-        .map(x::Window::new)
-        .collect();
+    let windows = client_list_payload(world);
     set_property(
         x11,
         x11.root(),
@@ -490,10 +492,7 @@ pub fn update_client_stacking_list(
     x11: &X11,
     stacking: &bspwm_xstack::StackMirror,
 ) -> xcb::ProtocolResult<()> {
-    let windows: Vec<_> = client_stacking_payload(stacking)
-        .into_iter()
-        .map(x::Window::new)
-        .collect();
+    let windows = client_stacking_payload(stacking);
     set_property(
         x11,
         x11.root(),
@@ -776,11 +775,17 @@ mod tests {
         }
 
         let (mut world, [left, _], [one, _, _], [first, second]) = sample_world();
-        assert_eq!(client_list_payload(&world), [0x100, 0x200]);
+        assert_eq!(
+            client_list_payload(&world),
+            [x::Window::new(0x100), x::Window::new(0x200)]
+        );
         let mut stacking = bspwm_xstack::StackMirror::new();
         let _ = stacking.insert(&mut Noop, 0x200, 3);
         let _ = stacking.insert(&mut Noop, 0x100, 3);
-        assert_eq!(client_stacking_payload(&stacking), [0x200, 0x100]);
+        assert_eq!(
+            client_stacking_payload(&stacking),
+            [x::Window::new(0x200), x::Window::new(0x100)]
+        );
         world.focused_monitor = Some(left);
         world.monitor_mut(left).active_desktop = Some(one);
         world.desktop_mut(one).tree.focus = Some(first);

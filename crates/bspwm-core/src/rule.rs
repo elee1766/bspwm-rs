@@ -191,7 +191,7 @@ pub fn apply_builtin_rules(properties: &BuiltinRuleProperties, consequence: &mut
 
 impl fmt::Display for RuleConsequence {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(output, "{}", print_rule_consequence(self))
+        write_rule_consequence(output, self)
     }
 }
 
@@ -242,12 +242,11 @@ impl RuleList {
         let mut output = String::new();
         for rule in &self.rules {
             let operator = if rule.one_shot { '-' } else { '=' };
-            writeln!(
+            let _ = writeln!(
                 output,
                 "{}:{}:{} {operator}> {}",
                 rule.class_name, rule.instance_name, rule.name, rule.effect
-            )
-            .expect("writing to a String cannot fail");
+            );
         }
         output
     }
@@ -329,10 +328,15 @@ pub fn parse_key_value(key: &str, value: &str, consequence: &mut RuleConsequence
     }
 }
 
-#[must_use]
-pub fn print_rule_consequence(consequence: &RuleConsequence) -> String {
-    format!(
-        "monitor={} desktop={} node={} state={} layer={} honor_size_hints={} split_dir={} split_ratio={:.6} hidden={} sticky={} private={} locked={} marked={} center={} follow={} manage={} focus={} border={} rectangle={}",
+/// Formats a rule consequence into the given writer.
+#[allow(clippy::missing_errors_doc)]
+pub fn write_rule_consequence(
+    output: &mut impl fmt::Write,
+    consequence: &RuleConsequence,
+) -> fmt::Result {
+    write!(
+        output,
+        "monitor={} desktop={} node={} state={} layer={} honor_size_hints={} split_dir={} split_ratio={:.6} hidden={} sticky={} private={} locked={} marked={} center={} follow={} manage={} focus={} border={} rectangle=",
         consequence.monitor_desc,
         consequence.desktop_desc,
         consequence.node_desc,
@@ -351,11 +355,20 @@ pub fn print_rule_consequence(consequence: &RuleConsequence) -> String {
         on_off(consequence.manage),
         on_off(consequence.focus),
         on_off(consequence.border),
-        match consequence.rect {
-            Some(r) => r.to_string(),
-            None => String::new(),
-        },
-    )
+    )?;
+    if let Some(r) = consequence.rect {
+        write!(output, "{r}")?;
+    }
+    Ok(())
+}
+
+/// Formats a rule consequence as a `String`.
+#[must_use]
+pub fn print_rule_consequence(consequence: &RuleConsequence) -> String {
+    let mut output = String::new();
+    // Writing to a String cannot fail.
+    let _ = write_rule_consequence(&mut output, consequence);
+    output
 }
 
 fn parse_cause(cause: &str) -> [String; 3] {
