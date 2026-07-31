@@ -6,7 +6,7 @@ use xcb::{Xid, XidNew, x};
 
 use super::DaemonApp;
 use crate::arrange;
-use crate::helpers::color_pixel;
+use crate::parse::color_pixel;
 use crate::runtime::RuntimeError;
 use crate::window;
 use crate::world::{DesktopId, MonitorId};

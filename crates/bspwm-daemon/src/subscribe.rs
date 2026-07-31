@@ -2,7 +2,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use crate::helpers::mktempfifo;
+use bspwm_ipc::create_fifo;
+
 use crate::messages::{Response, Subscription, fail_parts, scan_integer};
 use crate::parse::parse_subscriber_mask;
 use crate::settings::Settings;
@@ -172,7 +173,7 @@ pub fn subscribe(args: &[&[u8]], rsp: &mut dyn Response) -> io::Result<Option<Su
                 index += 2;
             }
             b"-f" | b"--fifo" => {
-                if let Ok(path) = mktempfifo(FIFO_TEMPLATE) {
+                if let Ok(path) = create_fifo(FIFO_TEMPLATE) {
                     remove_path(fifo_path.as_ref());
                     fifo_path = Some(path);
                 } else {

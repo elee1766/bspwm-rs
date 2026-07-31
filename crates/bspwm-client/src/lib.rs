@@ -1,60 +1,17 @@
-use std::env;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-pub const BUFFER_SIZE: usize = 8192;
-pub const FAILURE_MESSAGE: u8 = 0x07;
-pub const SOCKET_ENV_VAR: &str = "BSPWM_SOCKET";
-pub const SOCKET_PATH_TEMPLATE: &str = "/tmp/bspwm{host}_{display}_{screen}-socket";
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Display {
-    pub host: String,
-    pub display: i32,
-    pub screen: i32,
-}
+pub use bspwm_ipc::{
+    BUFFER_SIZE, Display, FAILURE_MESSAGE, SOCKET_ENV_VAR, SOCKET_PATH_TEMPLATE,
+    expand_path_template, parse_display, socket_path_from_env,
+};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Response {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub failed: bool,
-}
-
-#[must_use]
-pub fn parse_display(value: &str) -> Option<Display> {
-    let value = value.rsplit_once('/').map_or(value, |(_, display)| display);
-    let (host, numbers) = value.rsplit_once(':')?;
-    let (display, screen) = numbers
-        .split_once('.')
-        .map_or((numbers, "0"), |parts| parts);
-    Some(Display {
-        host: host.into(),
-        display: display.parse().ok()?,
-        screen: screen.parse().ok()?,
-    })
-}
-
-/// Expands `{host}`, `{display}`, and `{screen}` placeholders in a path
-/// template using the given display information.
-#[must_use]
-pub fn expand_path_template(template: &str, display: &Display) -> PathBuf {
-    PathBuf::from(
-        template
-            .replace("{host}", &display.host)
-            .replace("{display}", &display.display.to_string())
-            .replace("{screen}", &display.screen.to_string()),
-    )
-}
-
-#[must_use]
-pub fn socket_path_from_env() -> Option<PathBuf> {
-    if let Some(path) = env::var_os(SOCKET_ENV_VAR) {
-        return Some(PathBuf::from(path));
-    }
-    let display = parse_display(&env::var("DISPLAY").ok()?)?;
-    Some(expand_path_template(SOCKET_PATH_TEMPLATE, &display))
 }
 
 #[must_use]

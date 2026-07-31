@@ -5,6 +5,9 @@ edition = "2024"
 license = "BSD-2-Clause"
 description = "Client library and command-line client for bspwm"
 
+[dependencies]
+bspwm-ipc = { version = "0.9.12", path = "../bspwm-ipc" }
+
 [lints.rust]
 unsafe_code = "forbid"
 

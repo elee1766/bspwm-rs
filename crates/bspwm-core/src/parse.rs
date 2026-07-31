@@ -199,6 +199,12 @@ pub fn is_hex_color(value: &str) -> bool {
     bytes.len() == 7 && bytes[0] == b'#' && bytes[1..].iter().all(u8::is_ascii_hexdigit)
 }
 
+/// Converts `#RRGGBB` to the opaque pixel used by bspwm on 32-bit visuals.
+#[must_use]
+pub fn color_pixel(value: &str) -> u32 {
+    u32::from_str_radix(value.trim_start_matches('#'), 16).unwrap_or_default() | 0xFF00_0000
+}
+
 #[must_use]
 pub fn parse_honor_size_hints_mode(input: &str) -> Option<HonorSizeHintsMode> {
     match input {
@@ -653,6 +659,7 @@ mod tests {
         assert!(!is_hex_color("#abc"));
         assert!(!is_hex_color("112233"));
         assert!(!is_hex_color("#gg0000"));
+        assert_eq!(color_pixel("#123456"), 0xFF12_3456);
     }
 
     #[test]

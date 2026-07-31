@@ -11,13 +11,14 @@ name = "bspwm"
 [dependencies]
 bspwm-client = { version = "0.9.12", path = "../bspwm-client" }
 bspwm-core = { version = "0.9.12", path = "../bspwm-core" }
+bspwm-ipc = { version = "0.9.12", path = "../bspwm-ipc" }
 bspwm-model = { version = "0.9.12", path = "../bspwm-model" }
 bspwm-xstack = { version = "0.1.0", path = "../bspwm-xstack" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2"
 xcb = { version = "1.7.0", features = ["randr", "shape", "sync", "xinerama"] }
-nix = { version = "0.30", features = ["fs", "poll", "process", "signal", "socket"] }
+nix = { version = "0.30", features = ["fs", "process", "signal"] }
 mio = { version = "1", features = ["os-poll", "os-ext"] }
 listenfd = "1.0.2"
 signal-hook = "0.4.4"

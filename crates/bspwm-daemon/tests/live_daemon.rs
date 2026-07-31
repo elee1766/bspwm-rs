@@ -831,11 +831,10 @@ fn live_root_configure_updates_screen_dimensions_without_resizing_monitor() {
 fn live_schedule_applies_class_type_and_user_rules() {
     let x11 = X11::connect(None).expect("connect to DISPLAY");
     let (mut app, _, _) = app_with_desktop();
-    app.state.rules.add_rule(Rule::from_cause(
-        "DialogApp:*:*",
-        "layer=above border=off",
-        true,
-    ));
+    app.state.settings.put_dialogs_above = true;
+    app.state
+        .rules
+        .add_rule(Rule::from_cause("DialogApp:*:*", "border=off", true));
     app.state
         .rules
         .add_rule(Rule::from_cause("ToolApp:*:*", "manage=off", false));

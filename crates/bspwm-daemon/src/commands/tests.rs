@@ -491,6 +491,7 @@ fn every_global_setting_round_trips() {
         (b"ignore_ewmh_focus", b"on", b"true\n"),
         (b"ignore_ewmh_struts", b"on", b"true\n"),
         (b"ignore_ewmh_fullscreen", b"enter,exit", b"enter,exit\n"),
+        (b"put_dialogs_above", b"on", b"true\n"),
         (b"center_pseudo_tiled", b"off", b"false\n"),
         (b"honor_size_hints", b"floating", b"floating\n"),
         (b"remove_disabled_monitors", b"on", b"true\n"),

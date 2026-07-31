@@ -7,7 +7,6 @@ pub mod daemon;
 pub mod entrypoint;
 pub mod events;
 pub mod ewmh;
-pub mod helpers;
 pub mod messages;
 pub mod monitor;
 pub mod pointer;

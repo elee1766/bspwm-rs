@@ -163,13 +163,20 @@ impl RuleConsequence {
     }
 }
 
-pub fn apply_builtin_rules(properties: &BuiltinRuleProperties, consequence: &mut RuleConsequence) {
+pub fn apply_builtin_rules(
+    properties: &BuiltinRuleProperties,
+    put_dialogs_above: bool,
+    consequence: &mut RuleConsequence,
+) {
     for window_type in &properties.window_types {
         match window_type {
             BuiltinWindowType::Toolbar | BuiltinWindowType::Utility => consequence.focus = false,
             BuiltinWindowType::Dialog => {
                 consequence.state = Some(ClientState::Floating);
                 consequence.center = true;
+                if put_dialogs_above {
+                    consequence.layer = Some(StackLayer::Above);
+                }
             }
             BuiltinWindowType::Dock
             | BuiltinWindowType::Desktop

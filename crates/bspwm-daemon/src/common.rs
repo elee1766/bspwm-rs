@@ -1,7 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 
-pub use bspwm_client::{
+pub use bspwm_ipc::{
     Display, FAILURE_MESSAGE, SOCKET_ENV_VAR, SOCKET_PATH_TEMPLATE, expand_path_template,
     parse_display, socket_path_from_env,
 };

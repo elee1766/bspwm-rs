@@ -42,6 +42,7 @@ pub struct Settings {
     pub ignore_ewmh_focus: bool,
     pub ignore_ewmh_struts: bool,
     pub ignore_ewmh_fullscreen: StateTransitions,
+    pub put_dialogs_above: bool,
     pub center_pseudo_tiled: bool,
     pub honor_size_hints: HonorSizeHintsMode,
     pub remove_disabled_monitors: bool,
@@ -92,6 +93,7 @@ impl Default for Settings {
             ignore_ewmh_focus: false,
             ignore_ewmh_struts: false,
             ignore_ewmh_fullscreen: StateTransitions::NONE,
+            put_dialogs_above: false,
             center_pseudo_tiled: true,
             honor_size_hints: HonorSizeHintsMode::No,
             remove_disabled_monitors: false,
@@ -119,5 +121,6 @@ mod tests {
         assert!(!settings.enable_ewmh_ping);
         assert!(!settings.enable_ewmh_allowed_actions);
         assert_eq!(settings.ignore_ewmh_fullscreen, StateTransitions::NONE);
+        assert!(!settings.put_dialogs_above);
     }
 }

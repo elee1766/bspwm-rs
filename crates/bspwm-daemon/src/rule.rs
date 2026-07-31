@@ -418,11 +418,31 @@ mod tests {
                 transient: true,
                 ..BuiltinRuleProperties::default()
             },
+            true,
             &mut consequence,
         );
         assert!(!consequence.focus);
         assert_eq!(consequence.state, Some(ClientState::Floating));
         assert_eq!(consequence.layer, Some(StackLayer::Below));
         assert!(consequence.center && consequence.sticky);
+    }
+
+    #[test]
+    fn dialog_layer_setting_precedes_user_rule_effects() {
+        let properties = BuiltinRuleProperties {
+            window_types: vec![BuiltinWindowType::Dialog],
+            ..BuiltinRuleProperties::default()
+        };
+
+        let mut disabled = RuleConsequence::default();
+        apply_builtin_rules(&properties, false, &mut disabled);
+        assert_eq!(disabled.state, Some(ClientState::Floating));
+        assert_eq!(disabled.layer, None);
+
+        let mut enabled = RuleConsequence::default();
+        apply_builtin_rules(&properties, true, &mut enabled);
+        assert_eq!(enabled.layer, Some(StackLayer::Above));
+        parse_keys_values("layer=below", &mut enabled);
+        assert_eq!(enabled.layer, Some(StackLayer::Below));
     }
 }

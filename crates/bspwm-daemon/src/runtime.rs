@@ -9,10 +9,8 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{self, Read, Write};
-use std::net::Shutdown;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::io::{self, Write};
+use std::os::fd::RawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -24,17 +22,16 @@ use std::time::Duration;
 use listenfd::ListenFd;
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Token};
-use nix::errno::Errno;
-use nix::fcntl::{FcntlArg, FdFlag, fcntl};
-use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
 use signal_hook::consts::signal::{SIGCHLD, SIGHUP, SIGINT, SIGPIPE, SIGTERM};
 use signal_hook::flag;
 use xcb::x;
 
-use crate::bspc::BUFFER_SIZE;
-use crate::common::{FAILURE_MESSAGE, state_path_from_env};
+use bspwm_ipc::{BUFFER_SIZE, FAILURE_MESSAGE};
+pub use bspwm_ipc::{SocketListener, UnixResponse, receive_request};
+
+use crate::common::state_path_from_env;
 use crate::ewmh;
 use crate::messages::{
     MessageControl, MessageHandler, MessageOutcome, Response, Subscription, handle_message,
@@ -239,226 +236,9 @@ pub enum RuntimeError {
     Connection(#[from] xcb::ConnError),
 }
 
-/// A listener that removes only the exact filesystem socket it created.
-#[derive(Debug)]
-pub struct SocketListener {
-    listener: UnixListener,
-    path: PathBuf,
-    device: u64,
-    inode: u64,
-}
-
-impl SocketListener {
-    pub fn bind(path: impl AsRef<Path>) -> io::Result<Self> {
-        let path = path.as_ref();
-        let listener = match UnixListener::bind(path) {
-            Ok(listener) => listener,
-            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                remove_stale_socket(path)?;
-                UnixListener::bind(path)?
-            }
-            Err(error) => return Err(error),
-        };
-        listener.set_nonblocking(true)?;
-        let metadata = fs::metadata(path)?;
-        Ok(Self {
-            listener,
-            path: path.to_path_buf(),
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        })
-    }
-
-    pub fn inherited(listener: UnixListener, path: impl AsRef<Path>) -> io::Result<Self> {
-        let path = path.as_ref();
-        listener.set_nonblocking(true)?;
-        let metadata = fs::metadata(path)?;
-        Ok(Self {
-            listener,
-            path: path.to_path_buf(),
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        })
-    }
-
-    fn raw_fd(&self) -> RawFd {
-        self.listener.as_raw_fd()
-    }
-
-    fn set_inheritable(&self) -> io::Result<()> {
-        set_inheritable(&self.listener)
-    }
-
-    pub fn accept(&self) -> io::Result<(UnixStream, std::os::unix::net::SocketAddr)> {
-        self.listener.accept()
-    }
-
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for SocketListener {
-    fn drop(&mut self) {
-        if fs::metadata(&self.path)
-            .is_ok_and(|metadata| metadata.dev() == self.device && metadata.ino() == self.inode)
-        {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-fn remove_stale_socket(path: &Path) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_socket() {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "refusing to replace a non-socket filesystem entry",
-        ));
-    }
-    match UnixStream::connect(path) {
-        Ok(_) => Err(io::Error::new(
-            io::ErrorKind::AddrInUse,
-            "an active process owns the Unix socket",
-        )),
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
-            ) =>
-        {
-            fs::remove_file(path)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-#[derive(Debug)]
-pub struct UnixResponse {
-    stream: UnixStream,
-    closed: bool,
-}
-
-impl UnixResponse {
-    #[must_use]
-    pub const fn new(stream: UnixStream) -> Self {
-        Self {
-            stream,
-            closed: false,
-        }
-    }
-
-    #[must_use]
-    pub const fn is_closed(&self) -> bool {
-        self.closed
-    }
-
-    /// Reports whether the peer has gone away, without blocking.
-    ///
-    /// The event loop calls this for every retained subscriber on every pass,
-    /// so it asks for a one-shot non-blocking read with `MSG_DONTWAIT` instead
-    /// of bracketing a blocking read with two `O_NONBLOCK` toggles: same
-    /// answer, one syscall instead of three.
-    /// Reports whether the peer has torn the connection down completely.
-    ///
-    /// End-of-file on the read side must NOT be treated as a disconnect.
-    /// `bspc` half-closes its write side as soon as it has sent the request,
-    /// so every socket subscriber sits at read-EOF for its entire lifetime
-    /// while remaining perfectly able to receive records. Only `POLLHUP`,
-    /// which the kernel raises once both directions are gone, means the peer
-    /// has actually disappeared.
-    ///
-    /// A subscriber whose peer vanishes without this noticing is still
-    /// reclaimed by the broadcast path, which drops any subscriber whose
-    /// write fails.
-    pub fn peer_disconnected(&mut self) -> bool {
-        if self.closed {
-            return true;
-        }
-        // An empty event set still reports POLLHUP/POLLERR/POLLNVAL.
-        let mut fds = [PollFd::new(self.stream.as_fd(), PollFlags::empty())];
-        match poll(&mut fds, PollTimeout::ZERO) {
-            // Nothing was reported, and a signal landing on the check says
-            // nothing about the peer either.
-            Ok(0) | Err(Errno::EINTR) => false,
-            Ok(_) => fds[0].revents().is_some_and(|revents| {
-                revents.intersects(PollFlags::POLLHUP | PollFlags::POLLERR | PollFlags::POLLNVAL)
-            }),
-            Err(_) => true,
-        }
-    }
-}
-
-impl AsFd for UnixResponse {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.stream.as_fd()
-    }
-}
-
-impl Write for UnixResponse {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        if self.closed {
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "response is closed",
-            ));
-        }
-        self.stream.write(buffer)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        if self.closed {
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "response is closed",
-            ));
-        }
-        self.stream.flush()
-    }
-}
-
 impl Response for UnixResponse {
     fn close(&mut self) -> io::Result<()> {
-        if self.closed {
-            return Ok(());
-        }
-        match self.stream.shutdown(Shutdown::Write) {
-            Ok(()) => {
-                self.closed = true;
-                Ok(())
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotConnected => {
-                self.closed = true;
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
-    }
-}
-
-pub fn receive_request(reader: &mut impl Read, limit: usize) -> io::Result<Vec<u8>> {
-    let mut request = Vec::with_capacity(limit.min(BUFFER_SIZE));
-    let mut buffer = [0_u8; BUFFER_SIZE + 1];
-    loop {
-        let remaining = limit.saturating_sub(request.len());
-        let read_length = remaining.saturating_add(1).min(buffer.len());
-        let count = match reader.read(&mut buffer[..read_length]) {
-            Ok(0) => return Ok(request),
-            Ok(count) => count,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        };
-        request.extend_from_slice(&buffer[..count]);
-        if request.len() > limit {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("request exceeds the {limit}-byte limit"),
-            ));
-        }
-        if request.last() == Some(&0) {
-            return Ok(request);
-        }
+        UnixResponse::close(self)
     }
 }
 
@@ -907,13 +687,6 @@ impl<A: RuntimeApp> Runtime<A> {
     }
 }
 
-fn set_inheritable(fd: &impl AsFd) -> io::Result<()> {
-    let flags = FdFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFD).map_err(io::Error::from)?);
-    fcntl(fd, FcntlArg::F_SETFD(flags - FdFlag::FD_CLOEXEC))
-        .map(|_| ())
-        .map_err(io::Error::from)
-}
-
 #[must_use]
 pub fn restart_arguments(
     original: &[OsString],
@@ -1001,6 +774,9 @@ pub fn write_request_error(stream: UnixStream, error: &io::Error) -> io::Result<
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+    use std::net::Shutdown;
+    use std::os::fd::AsRawFd;
     use std::process::Stdio;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;

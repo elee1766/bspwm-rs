@@ -1,0 +1,17 @@
+[package]
+name = "bspwm-ipc"
+version = "0.9.12"
+edition = "2024"
+license = "BSD-2-Clause"
+description = "Unix IPC primitives shared by bspwm and bspc"
+
+[dependencies]
+getrandom = { version = "0.4", features = ["std"] }
+nix = { version = "0.30", features = ["fs", "poll"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

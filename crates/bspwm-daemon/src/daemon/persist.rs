@@ -8,10 +8,12 @@ use std::path::Path;
 
 use xcb::{Xid, XidNew, x};
 
+use bspwm_ipc::set_inheritable;
+
 use super::DaemonApp;
 use super::action::XAction;
 use crate::ewmh;
-use crate::messages::{Response, Subscription};
+use crate::messages::Subscription;
 use crate::monitor;
 use crate::restore;
 use crate::runtime::{InheritedFds, RuntimeError, UnixResponse};
@@ -291,7 +293,7 @@ impl DaemonApp {
             .iter()
             .map(|subscriber| {
                 let fd = subscriber.stream.as_fd().as_raw_fd();
-                set_output_inheritable(&subscriber.stream)?;
+                set_inheritable(&subscriber.stream)?;
                 descriptors.push(fd);
                 let mut value = serde_json::json!({
                     "fileDescriptor": fd,
@@ -345,18 +347,6 @@ impl DaemonApp {
             SubscriberOutput::Fifo(_) => false,
         });
     }
-}
-
-fn set_output_inheritable(output: &SubscriberOutput) -> io::Result<()> {
-    let flags = nix::fcntl::FdFlag::from_bits_truncate(
-        nix::fcntl::fcntl(output, nix::fcntl::FcntlArg::F_GETFD).map_err(io::Error::from)?,
-    );
-    nix::fcntl::fcntl(
-        output,
-        nix::fcntl::FcntlArg::F_SETFD(flags - nix::fcntl::FdFlag::FD_CLOEXEC),
-    )
-    .map(|_| ())
-    .map_err(io::Error::from)
 }
 
 #[cfg(test)]

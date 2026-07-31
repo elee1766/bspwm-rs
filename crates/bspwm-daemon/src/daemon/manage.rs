@@ -369,7 +369,11 @@ impl DaemonApp {
             .builtin
             .window_types
             .contains(&crate::rule::BuiltinWindowType::Desktop);
-        apply_builtin_rules(&properties.builtin, &mut consequence);
+        apply_builtin_rules(
+            &properties.builtin,
+            self.state.settings.put_dialogs_above,
+            &mut consequence,
+        );
         consequence.set_window_properties(&properties.identity);
         self.state.rules.apply_rules(&mut consequence);
         if !self.state.settings.external_rules_command.is_empty() {
