@@ -1,0 +1,21 @@
+[package]
+name = "bspwm-state"
+version = "0.9.12"
+edition = "2024"
+license = "BSD-2-Clause"
+description = "Pure daemon state, queries, and restoration for bspwm-rs"
+
+[dependencies]
+bspwm-core = { version = "0.9.12", path = "../bspwm-core" }
+bspwm-model = { version = "0.9.12", path = "../bspwm-model" }
+bspwm-xstack = { version = "0.1.0", path = "../bspwm-xstack" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

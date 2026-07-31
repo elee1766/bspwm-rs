@@ -97,12 +97,12 @@ dependencies = [
  "bspwm-core",
  "bspwm-ipc",
  "bspwm-model",
+ "bspwm-state",
  "bspwm-xstack",
  "listenfd",
  "log",
  "mio",
  "nix",
- "serde",
  "serde_json",
  "signal-hook",
  "thiserror",
@@ -135,6 +135,18 @@ dependencies = [
  "env_logger",
  "log",
  "xcb",
+]
+
+[[package]]
+name = "bspwm-state"
+version = "0.9.12"
+dependencies = [
+ "bspwm-core",
+ "bspwm-model",
+ "bspwm-xstack",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
