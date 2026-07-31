@@ -5,7 +5,8 @@
 //! there does not have to pull in X plumbing for tests it never runs.
 #![allow(clippy::field_reassign_with_default)]
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -15,7 +16,7 @@ use bspwm::daemon::{ClientInitial, DaemonApp, XEventContext};
 use bspwm::events::EventHandler;
 use bspwm::messages::{Domain, MessageHandler, Response};
 use bspwm::rule::{Rule, RuleConsequence};
-use bspwm::runtime::RuntimeApp;
+use bspwm::runtime::{RuntimeApp, UnixResponse};
 use bspwm::settings::Settings;
 use bspwm::state::{CommandEffect, DaemonState};
 use bspwm::tree::{NodeId, SizeHints};
@@ -101,6 +102,91 @@ fn manage_window_with(
 fn executes_action_plan_on_live_x_server() {
     let x11 = X11::connect(None).expect("connect to DISPLAY");
     DaemonApp::execute_plan(&x11, &[]).expect("execute empty plan");
+}
+
+#[test]
+#[ignore = "requires a live X server selected by DISPLAY"]
+fn live_stacking_operations_emit_node_stack_subscriptions() {
+    let x11 = X11::connect(None).expect("connect to DISPLAY");
+    let (mut app, _, desktop) = app_with_desktop();
+    let mut response = TestResponse::default();
+    let subscription = app
+        .dispatch(
+            Domain::Subscribe,
+            &[b"--count", b"2", b"node_stack"],
+            &mut response,
+        )
+        .unwrap()
+        .unwrap();
+    let (server, mut subscriber) = UnixStream::pair().unwrap();
+    subscriber
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    RuntimeApp::retain_response(&mut app, UnixResponse::new(server), subscription).unwrap();
+
+    let first: x::Window = x11.connection().generate_id();
+    let second: x::Window = x11.connection().generate_id();
+    create_live_window(&x11, first, false);
+    create_live_window(&x11, second, false);
+    let mut consequence = RuleConsequence::default();
+    consequence.focus = false;
+    let first_node = manage_window_with(
+        &mut app,
+        first.resource_id(),
+        &consequence,
+        Rectangle::new(0, 0, 20, 20),
+        SizeHints::default(),
+        x11.connection().generate_id::<x::Window>().resource_id(),
+    )
+    .unwrap()
+    .2;
+    app.state.world.desktop_mut(desktop).tree.focus = None;
+    app.state.pending_effects.push(CommandEffect::Restack {
+        node: first_node,
+        auto_raise: true,
+    });
+    app.execute_pending_effects(&x11).unwrap();
+
+    let second_node = manage_window_with(
+        &mut app,
+        second.resource_id(),
+        &consequence,
+        Rectangle::new(20, 0, 20, 20),
+        SizeHints::default(),
+        x11.connection().generate_id::<x::Window>().resource_id(),
+    )
+    .unwrap()
+    .2;
+    app.state.world.desktop_mut(desktop).tree.focus = None;
+    app.state.pending_effects.push(CommandEffect::Restack {
+        node: second_node,
+        auto_raise: true,
+    });
+    app.execute_pending_effects(&x11).unwrap();
+
+    app.state.world.desktop_mut(desktop).tree.focus = Some(second_node);
+    app.state.pending_effects.push(CommandEffect::Restack {
+        node: second_node,
+        auto_raise: true,
+    });
+    app.execute_pending_effects(&x11).unwrap();
+
+    let mut records = Vec::new();
+    subscriber.read_to_end(&mut records).unwrap();
+    assert_eq!(
+        records,
+        format!(
+            "node_stack 0x{:08X} below 0x{:08X}\nnode_stack 0x{:08X} above 0x{:08X}\n",
+            second.resource_id(),
+            first.resource_id(),
+            second.resource_id(),
+            first.resource_id(),
+        )
+        .as_bytes()
+    );
+
+    window::destroy(&x11, first).ok();
+    window::destroy(&x11, second).ok();
 }
 
 #[test]

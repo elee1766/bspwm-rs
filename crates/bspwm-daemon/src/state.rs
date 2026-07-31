@@ -61,6 +61,7 @@ pub enum CommandEffect {
         node: NodeId,
         auto_raise: bool,
     },
+    ReconcileStack,
     SyncEwmh,
     SetWindowVisibility {
         node: NodeId,
@@ -171,6 +172,7 @@ impl CommandEffect {
                 ..
             } => monitor(*id) && desktop(*on) && at.is_none_or(node),
             Self::DestroyMonitorRoot { .. }
+            | Self::ReconcileStack
             | Self::SyncEwmh
             | Self::RegrabButtons
             | Self::RefreshColors

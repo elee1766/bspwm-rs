@@ -65,7 +65,6 @@ pub(super) fn node_geometry_status(
     )
 }
 
-#[cfg(test)]
 pub(super) fn node_stack_status(node: u32, relation: &str, sibling: u32) -> String {
     format!("node_stack 0x{node:08X} {relation} 0x{sibling:08X}\n")
 }
@@ -178,5 +177,28 @@ mod tests {
             node_stack_status(0x10, "below", 0x20),
             "node_stack 0x00000010 below 0x00000020\n"
         );
+    }
+
+    #[test]
+    fn stack_operations_publish_upstream_subscription_records() {
+        let (mut app, _, _) = app_with_desktop();
+        let mut client = subscribe_socket(&mut app, b"subscribe\0-c\0\x32\0node_stack\0");
+
+        app.publish_stack_operations(&[
+            bspwm_xstack::StackOp::Above {
+                window: 0x10,
+                sibling: 0x20,
+            },
+            bspwm_xstack::StackOp::Below {
+                window: 0x30,
+                sibling: 0x40,
+            },
+        ]);
+
+        assert_eq!(
+            read_available(&mut client),
+            b"node_stack 0x00000010 above 0x00000020\nnode_stack 0x00000030 below 0x00000040\n"
+        );
+        assert_eq!(app.subscriber_count(), 0);
     }
 }

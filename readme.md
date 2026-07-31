@@ -27,9 +27,13 @@ we have support for _NET_WM_MOVERESIZE https://github.com/baskerville/bspwm/pull
 
 i added support for syncronization in resize. i dont know what really supports this though? need to test more
 
+### stacking
+
 i also changed the underlying stacking logic. the hope is the new logic is more maintainable.
 
 it might cause some incompatiblities with how bspwm does stacking. please point these out and i can attempt to address them.
+
+to be honest, i have been frustrated with bspwm floating stacking logic for a long time. i use the window manager hybrid tiled and floating, with windows floating by default. my hope is that this stacking backend will allow for many of my issues to be resolved.
 
 ## installation
 

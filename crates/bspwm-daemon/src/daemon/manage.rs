@@ -531,19 +531,24 @@ impl DaemonApp {
             )
         });
         if let Some((window_id, level, stacking_enabled, transient_for)) = stack_info {
-            let mut backend = super::monitors::X11StackBackend { x11 };
             if let Some(parent_xid) = transient_for {
-                self.state
+                let mut backend = super::monitors::X11StackBackend::new(x11);
+                let result = self
+                    .state
                     .stacking_order
-                    .set_transient(window_id, parent_xid);
+                    .set_transient(&mut backend, window_id, parent_xid);
+                self.complete_stack_operation(backend, result)?;
             }
             // Upstream stack() skips floating clients while auto_raise is
             // disabled. Other new clients are placed at the top of their
             // level when focused and at the bottom otherwise.
             if stacking_enabled {
-                self.state
+                let mut backend = super::monitors::X11StackBackend::new(x11);
+                let result = self
+                    .state
                     .stacking_order
-                    .set_level(&mut backend, window_id, level, focused)?;
+                    .set_level(&mut backend, window_id, level, focused);
+                self.complete_stack_operation(backend, result)?;
             }
         }
         self.sync_stacking_ewmh(x11, desktop)?;
@@ -738,7 +743,6 @@ impl DaemonApp {
             if self.state.world.tree.node(leaf).client.is_some() {
                 let xid = self.state.world.tree.node(leaf).external_id;
                 self.state.stacking_order.remove(xid);
-                self.state.stacking_order.clear_transient(xid);
             }
         }
         self.tree_mut().cancel_presel(node);

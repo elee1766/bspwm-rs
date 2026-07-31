@@ -23,6 +23,25 @@ pub trait StackBackend {
     fn stack_below(&mut self, window: u32, sibling: u32) -> Result<(), Self::Error>;
 }
 
+#[derive(Default)]
+struct PlanningBackend {
+    operations: Vec<StackOp>,
+}
+
+impl StackBackend for PlanningBackend {
+    type Error = std::convert::Infallible;
+
+    fn stack_above(&mut self, window: u32, sibling: u32) -> Result<(), Self::Error> {
+        self.operations.push(StackOp::Above { window, sibling });
+        Ok(())
+    }
+
+    fn stack_below(&mut self, window: u32, sibling: u32) -> Result<(), Self::Error> {
+        self.operations.push(StackOp::Below { window, sibling });
+        Ok(())
+    }
+}
+
 /// Mirrors the X server's sibling stacking order and provides level-aware
 /// operations that maintain correctness with minimum X traffic.
 ///
@@ -94,6 +113,14 @@ impl StackMirror {
         self.position(window).is_some()
     }
 
+    /// Returns the registered transient parent for `child`.
+    #[must_use]
+    pub fn transient_parent(&self, child: u32) -> Option<u32> {
+        self.transients
+            .iter()
+            .find_map(|&(candidate, parent)| (candidate == child).then_some(parent))
+    }
+
     /// Insert a new window at the top of its level and apply to X.
     ///
     /// If the window is already tracked, it is raised to the top of its level.
@@ -103,13 +130,17 @@ impl StackMirror {
         window: u32,
         level: u8,
     ) -> Result<(), B::Error> {
-        self.raise_to_level_top(backend, window, level)
+        self.transaction(backend, |candidate, planner| {
+            candidate.raise_to_level_top(planner, window, level)
+        })
     }
 
     /// Remove a window from the mirror. No X operation needed -- the caller
     /// handles destroying or unmapping the window.
     pub fn remove(&mut self, window: u32) {
         self.order.retain(|e| e.window != window);
+        self.transients
+            .retain(|&(child, parent)| child != window && parent != window);
     }
 
     /// Raise a window to the top of its level and apply to X.
@@ -122,7 +153,9 @@ impl StackMirror {
         let Some(level) = self.level_of(window) else {
             return Ok(());
         };
-        self.raise_to_level_top(backend, window, level)
+        self.transaction(backend, |candidate, planner| {
+            candidate.raise_to_level_top(planner, window, level)
+        })
     }
 
     /// Lower a window to the bottom of its level and apply to X.
@@ -135,7 +168,9 @@ impl StackMirror {
         let Some(level) = self.level_of(window) else {
             return Ok(());
         };
-        self.move_to_level_bottom(backend, window, level)
+        self.transaction(backend, |candidate, planner| {
+            candidate.move_to_level_bottom(planner, window, level)
+        })
     }
 
     /// Change a window's level (e.g. state or layer changed) and reposition.
@@ -146,23 +181,45 @@ impl StackMirror {
         level: u8,
         focused: bool,
     ) -> Result<(), B::Error> {
-        if focused {
-            self.raise_to_level_top(backend, window, level)
-        } else {
-            self.move_to_level_bottom(backend, window, level)
-        }
+        self.transaction(backend, |candidate, planner| {
+            if focused {
+                candidate.raise_to_level_top(planner, window, level)
+            } else {
+                candidate.move_to_level_bottom(planner, window, level)
+            }
+        })
     }
 
     /// Register a transient-for relationship. The child will be
     /// automatically kept above the parent after every stacking operation.
-    pub fn set_transient(&mut self, child: u32, parent: u32) {
-        self.transients.retain(|&(c, _)| c != child);
-        self.transients.push((child, parent));
+    pub fn set_transient<B: StackBackend>(
+        &mut self,
+        backend: &mut B,
+        child: u32,
+        parent: u32,
+    ) -> Result<(), B::Error> {
+        self.transaction(backend, |candidate, _| {
+            candidate.transients.retain(|&(c, _)| c != child);
+            candidate.transients.push((child, parent));
+            Ok(())
+        })
     }
 
     /// Remove a transient-for relationship for `child`.
-    pub fn clear_transient(&mut self, child: u32) {
-        self.transients.retain(|&(c, _)| c != child);
+    pub fn clear_transient<B: StackBackend>(
+        &mut self,
+        backend: &mut B,
+        child: u32,
+    ) -> Result<(), B::Error> {
+        self.transaction(backend, |candidate, _| {
+            candidate.transients.retain(|&(c, _)| c != child);
+            Ok(())
+        })
+    }
+
+    /// Reconciles level and transient constraints after relationship changes.
+    pub fn reconcile<B: StackBackend>(&mut self, backend: &mut B) -> Result<(), B::Error> {
+        self.transaction(backend, |_, _| Ok(()))
     }
 
     /// Ensure a transient child is above its parent. If the child is below
@@ -173,28 +230,9 @@ impl StackMirror {
         child: u32,
         parent: u32,
     ) -> Result<(), B::Error> {
-        let Some(child_pos) = self.position(child) else {
-            return Ok(());
-        };
-        let Some(parent_pos) = self.position(parent) else {
-            return Ok(());
-        };
-        if child_pos > parent_pos {
-            // Already above parent.
-            return Ok(());
-        }
-        // Move child to immediately above parent.
-        let entry = self.order.remove(child_pos);
-        // parent_pos shifted down by 1 after the remove if parent was after child.
-        let insert_at = if parent_pos > child_pos {
-            parent_pos // was parent_pos - 1 + 1
-        } else {
-            parent_pos + 1
-        };
-        self.order.insert(insert_at, entry);
-        // Apply to X.
-        backend.stack_above(child, parent)?;
-        Ok(())
+        self.transaction(backend, |candidate, planner| {
+            candidate.enforce_transient_inner(planner, child, parent)
+        })
     }
 
     /// Enforce all registered transient relationships. Called after every
@@ -244,6 +282,142 @@ impl StackMirror {
             .map(|e| e.level)
     }
 
+    fn effective_level(&self, window: u32) -> u8 {
+        self.effective_level_from(window, self.level_of(window).unwrap_or_default())
+    }
+
+    fn effective_level_from(&self, window: u32, base_level: u8) -> u8 {
+        let mut level = base_level;
+        let mut current = window;
+        for _ in 0..self.transients.len() {
+            let Some(parent) = self
+                .transients
+                .iter()
+                .find_map(|&(child, parent)| (child == current).then_some(parent))
+            else {
+                break;
+            };
+            let Some(parent_level) = self.level_of(parent) else {
+                break;
+            };
+            level = level.max(parent_level);
+            current = parent;
+        }
+        level
+    }
+
+    fn normalize_order(&mut self) {
+        let levels: Vec<_> = self
+            .order
+            .iter()
+            .map(|entry| (entry.window, self.effective_level(entry.window)))
+            .collect();
+        self.order.sort_by_key(|entry| {
+            levels
+                .iter()
+                .find_map(|&(window, level)| (window == entry.window).then_some(level))
+                .unwrap_or(entry.level)
+        });
+
+        for _ in 0..self.transients.len().saturating_add(1) {
+            let mut moved = false;
+            for &(child, parent) in &self.transients {
+                let Some(child_pos) = self.position(child) else {
+                    continue;
+                };
+                let Some(parent_pos) = self.position(parent) else {
+                    continue;
+                };
+                if child_pos > parent_pos {
+                    continue;
+                }
+                let entry = self.order.remove(child_pos);
+                let parent_pos = self.position(parent).expect("parent was present");
+                self.order.insert(parent_pos + 1, entry);
+                moved = true;
+            }
+            if !moved {
+                break;
+            }
+        }
+    }
+
+    fn transaction<B: StackBackend>(
+        &mut self,
+        backend: &mut B,
+        mutate: impl FnOnce(&mut Self, &mut PlanningBackend) -> Result<(), std::convert::Infallible>,
+    ) -> Result<(), B::Error> {
+        let original = self.windows();
+        let mut candidate = self.clone();
+        candidate.normalize_order();
+        let mut operations = reconciliation_operations(&original, &candidate.windows());
+        let mut planner = PlanningBackend::default();
+        match mutate(&mut candidate, &mut planner) {
+            Ok(()) => {}
+            Err(error) => match error {},
+        }
+        operations.extend(planner.operations);
+        let mutated = candidate.windows();
+        candidate.normalize_order();
+        operations.extend(reconciliation_operations(&mutated, &candidate.windows()));
+        let mut applied = original.clone();
+        for operation in operations {
+            if let Err(error) = apply_operation(backend, operation) {
+                let same_windows = applied.len() == original.len()
+                    && applied.iter().all(|window| original.contains(window));
+                let mut rolled_back = same_windows;
+                if rolled_back {
+                    for rollback in reconciliation_operations(&applied, &original) {
+                        if apply_operation(backend, rollback).is_err() {
+                            rolled_back = false;
+                            break;
+                        }
+                        apply_operation_to_order(&mut applied, rollback);
+                    }
+                }
+                if !rolled_back {
+                    candidate.retain_order(&applied);
+                    *self = candidate;
+                }
+                return Err(error);
+            }
+            apply_operation_to_order(&mut applied, operation);
+        }
+        *self = candidate;
+        Ok(())
+    }
+
+    fn retain_order(&mut self, windows: &[u32]) {
+        let mut entries = Vec::with_capacity(windows.len());
+        for window in windows {
+            if let Some(entry) = self.order.iter().find(|entry| entry.window == *window) {
+                entries.push(*entry);
+            }
+        }
+        self.order = entries;
+    }
+
+    fn enforce_transient_inner<B: StackBackend>(
+        &mut self,
+        backend: &mut B,
+        child: u32,
+        parent: u32,
+    ) -> Result<(), B::Error> {
+        let Some(child_pos) = self.position(child) else {
+            return Ok(());
+        };
+        let Some(parent_pos) = self.position(parent) else {
+            return Ok(());
+        };
+        if child_pos > parent_pos {
+            return Ok(());
+        }
+        let entry = self.order.remove(child_pos);
+        let parent_pos = self.position(parent).expect("parent was present");
+        self.order.insert(parent_pos + 1, entry);
+        backend.stack_above(child, parent)
+    }
+
     /// Move window to the top of `level`. Emits at most one X operation.
     fn raise_to_level_top<B: StackBackend>(
         &mut self,
@@ -258,11 +432,12 @@ impl StackMirror {
         } else {
             false
         };
+        let effective_level = self.effective_level_from(window, level);
         // Find insertion point: after the last entry with level <= this level.
         let insert_at = self
             .order
             .iter()
-            .rposition(|e| e.level <= level)
+            .rposition(|e| self.effective_level(e.window) <= effective_level)
             .map_or(0, |i| i + 1);
         self.order.insert(insert_at, Entry { window, level });
         // Emit X operation if there are neighbors to position relative to.
@@ -285,11 +460,12 @@ impl StackMirror {
         } else {
             false
         };
+        let effective_level = self.effective_level_from(window, level);
         // Find insertion point: before the first entry with level >= this level.
         let insert_at = self
             .order
             .iter()
-            .position(|e| e.level >= level)
+            .position(|e| self.effective_level(e.window) >= effective_level)
             .unwrap_or(self.order.len());
         self.order.insert(insert_at, Entry { window, level });
         if was_present || self.order.len() > 1 {
@@ -317,6 +493,66 @@ impl StackMirror {
     }
 }
 
+fn reconciliation_operations(current: &[u32], desired: &[u32]) -> Vec<StackOp> {
+    let mut current = current.to_vec();
+    let mut operations = Vec::new();
+    let mut above = None;
+    for &window in desired.iter().rev() {
+        let position = current.iter().position(|candidate| *candidate == window);
+        let correctly_placed = match (position, above) {
+            (Some(position), None) => position + 1 == current.len(),
+            (Some(position), Some(above)) => current
+                .get(position + 1)
+                .is_some_and(|candidate| *candidate == above),
+            (None, _) => false,
+        };
+        if !correctly_placed {
+            if let Some(position) = position {
+                current.remove(position);
+            }
+            if let Some(above) = above {
+                let above_position = current
+                    .iter()
+                    .position(|candidate| *candidate == above)
+                    .expect("higher desired window was already placed");
+                current.insert(above_position, window);
+                operations.push(StackOp::Below {
+                    window,
+                    sibling: above,
+                });
+            } else if let Some(&sibling) = current.last() {
+                current.push(window);
+                operations.push(StackOp::Above { window, sibling });
+            } else {
+                current.push(window);
+            }
+        }
+        above = Some(window);
+    }
+    operations
+}
+
+fn apply_operation<B: StackBackend>(backend: &mut B, operation: StackOp) -> Result<(), B::Error> {
+    match operation {
+        StackOp::Above { window, sibling } => backend.stack_above(window, sibling),
+        StackOp::Below { window, sibling } => backend.stack_below(window, sibling),
+    }
+}
+
+fn apply_operation_to_order(order: &mut Vec<u32>, operation: StackOp) {
+    let (window, sibling, above) = match operation {
+        StackOp::Above { window, sibling } => (window, sibling, true),
+        StackOp::Below { window, sibling } => (window, sibling, false),
+    };
+    if let Some(position) = order.iter().position(|candidate| *candidate == window) {
+        order.remove(position);
+    }
+    let Some(sibling_position) = order.iter().position(|candidate| *candidate == sibling) else {
+        return;
+    };
+    order.insert(sibling_position + usize::from(above), window);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +576,42 @@ mod tests {
                 .borrow_mut()
                 .push(StackOp::Below { window, sibling });
             Ok(())
+        }
+    }
+
+    struct FailBackend;
+
+    impl StackBackend for FailBackend {
+        type Error = &'static str;
+
+        fn stack_above(&mut self, _: u32, _: u32) -> Result<(), Self::Error> {
+            Err("stack failed")
+        }
+
+        fn stack_below(&mut self, _: u32, _: u32) -> Result<(), Self::Error> {
+            Err("stack failed")
+        }
+    }
+
+    #[derive(Default)]
+    struct FailSecondBackend {
+        calls: usize,
+    }
+
+    impl StackBackend for FailSecondBackend {
+        type Error = &'static str;
+
+        fn stack_above(&mut self, _: u32, _: u32) -> Result<(), Self::Error> {
+            self.calls += 1;
+            if self.calls == 2 {
+                Err("stack failed")
+            } else {
+                Ok(())
+            }
+        }
+
+        fn stack_below(&mut self, _: u32, _: u32) -> Result<(), Self::Error> {
+            self.stack_above(0, 0)
         }
     }
 
@@ -418,6 +690,53 @@ mod tests {
         assert_eq!(mirror.windows(), [2]);
         mirror.insert(&mut &backend, 3, 3).unwrap();
         assert_eq!(mirror.windows(), [3, 2]);
+    }
+
+    #[test]
+    fn failed_backend_operation_keeps_original_mirror() {
+        let backend = RecordBackend::default();
+        let mut mirror = StackMirror::new();
+        mirror.insert(&mut &backend, 1, 3).unwrap();
+        mirror.insert(&mut &backend, 2, 3).unwrap();
+        let original = mirror.clone();
+
+        assert_eq!(
+            mirror.raise_in_level(&mut FailBackend, 1),
+            Err("stack failed")
+        );
+        assert_eq!(mirror, original);
+    }
+
+    #[test]
+    fn failed_transient_update_keeps_original_relationships() {
+        let backend = RecordBackend::default();
+        let mut mirror = StackMirror::new();
+        mirror.insert(&mut &backend, 1, 4).unwrap();
+        mirror.insert(&mut &backend, 2, 4).unwrap();
+        mirror.lower_in_level(&mut &backend, 1).unwrap();
+        let original = mirror.clone();
+
+        assert_eq!(
+            mirror.set_transient(&mut FailBackend, 1, 2),
+            Err("stack failed")
+        );
+        assert_eq!(mirror, original);
+    }
+
+    #[test]
+    fn partial_backend_failure_restores_original_order() {
+        let backend = RecordBackend::default();
+        let mut mirror = StackMirror::new();
+        mirror.insert(&mut &backend, 1, 4).unwrap();
+        mirror.insert(&mut &backend, 2, 4).unwrap();
+        mirror.insert(&mut &backend, 3, 4).unwrap();
+        mirror.transients = vec![(1, 3), (2, 3)];
+        let original = mirror.clone();
+        let mut failing = FailSecondBackend::default();
+
+        assert_eq!(mirror.reconcile(&mut failing), Err("stack failed"));
+        assert_eq!(mirror, original);
+        assert!(failing.calls > 2, "the successful prefix must be rolled back");
     }
 
     #[test]
@@ -718,7 +1037,7 @@ mod tests {
         mirror.insert(&mut &backend, 100, 4).unwrap(); // parent
         mirror.insert(&mut &backend, 200, 4).unwrap(); // child (transient)
         mirror.insert(&mut &backend, 300, 4).unwrap(); // unrelated
-        mirror.set_transient(200, 100);
+        mirror.set_transient(&mut &backend, 200, 100).unwrap();
 
         // Focus parent -- child should be above parent.
         mirror.raise_in_level(&mut &backend, 100).unwrap();
@@ -754,7 +1073,7 @@ mod tests {
         let mut mirror = StackMirror::new();
         mirror.insert(&mut &backend, 100, 4).unwrap();
         mirror.insert(&mut &backend, 200, 4).unwrap();
-        mirror.set_transient(200, 100);
+        mirror.set_transient(&mut &backend, 200, 100).unwrap();
 
         // Lower parent -- child must still be above parent.
         mirror.lower_in_level(&mut &backend, 100).unwrap();
@@ -774,8 +1093,8 @@ mod tests {
         mirror.insert(&mut &backend, 10, 4).unwrap();
         mirror.insert(&mut &backend, 20, 4).unwrap();
         mirror.insert(&mut &backend, 30, 4).unwrap();
-        mirror.set_transient(20, 10); // 20 transient for 10
-        mirror.set_transient(30, 20); // 30 transient for 20
+        mirror.set_transient(&mut &backend, 20, 10).unwrap(); // 20 transient for 10
+        mirror.set_transient(&mut &backend, 30, 20).unwrap(); // 30 transient for 20
 
         // Focus grandparent (raises it to top, displacing 20 and 30).
         mirror.raise_in_level(&mut &backend, 10).unwrap();
@@ -792,7 +1111,7 @@ mod tests {
         let mut mirror = StackMirror::new();
         mirror.insert(&mut &backend, 100, 4).unwrap();
         mirror.insert(&mut &backend, 200, 4).unwrap();
-        mirror.set_transient(200, 100);
+        mirror.set_transient(&mut &backend, 200, 100).unwrap();
 
         // Verify it's enforced.
         mirror.raise_in_level(&mut &backend, 100).unwrap();
@@ -801,7 +1120,7 @@ mod tests {
         assert!(child_pos > parent_pos);
 
         // Clear the transient relationship.
-        mirror.clear_transient(200);
+        mirror.clear_transient(&mut &backend, 200).unwrap();
 
         // Now raising parent should NOT pull child above it.
         mirror.lower_in_level(&mut &backend, 200).unwrap();
@@ -819,7 +1138,7 @@ mod tests {
         mirror.insert(&mut &backend, 10, 3).unwrap(); // tiled
         mirror.insert(&mut &backend, 20, 4).unwrap(); // floating, transient for 10
         mirror.insert(&mut &backend, 30, 4).unwrap(); // other floating
-        mirror.set_transient(20, 10);
+        mirror.set_transient(&mut &backend, 20, 10).unwrap();
 
         // Child is already above parent (different levels).
         let parent_pos = mirror.windows().iter().position(|&w| w == 10).unwrap();
@@ -842,15 +1161,38 @@ mod tests {
         let mut mirror = StackMirror::new();
         mirror.insert(&mut &backend, 100, 4).unwrap();
         mirror.insert(&mut &backend, 200, 4).unwrap();
-        mirror.set_transient(200, 100);
+        mirror.set_transient(&mut &backend, 200, 100).unwrap();
 
         // Remove parent.
         mirror.remove(100);
+        assert!(mirror.transients.is_empty());
         // Child should still be in the mirror.
         assert!(mirror.contains(200));
         // Transient should be gone (parent no longer exists).
         // Lowering child should work without panics.
         mirror.lower_in_level(&mut &backend, 200).unwrap();
+    }
+
+    #[test]
+    fn lower_level_transient_preserves_effective_level_order() {
+        let backend = RecordBackend::default();
+        let mut mirror = StackMirror::new();
+        mirror.insert(&mut &backend, 10, 3).unwrap();
+        mirror.insert(&mut &backend, 20, 5).unwrap();
+        mirror.insert(&mut &backend, 30, 7).unwrap();
+        mirror.set_transient(&mut &backend, 10, 30).unwrap();
+        assert_eq!(mirror.windows(), [20, 30, 10]);
+
+        backend.ops.borrow_mut().clear();
+        mirror.insert(&mut &backend, 40, 6).unwrap();
+        assert_eq!(mirror.windows(), [20, 40, 30, 10]);
+        assert_eq!(
+            backend.ops.borrow().as_slice(),
+            &[StackOp::Below {
+                window: 40,
+                sibling: 30,
+            }]
+        );
     }
 
     #[test]
@@ -861,8 +1203,8 @@ mod tests {
         mirror.insert(&mut &backend, 201, 4).unwrap(); // child 1
         mirror.insert(&mut &backend, 202, 4).unwrap(); // child 2
         mirror.insert(&mut &backend, 300, 4).unwrap(); // unrelated
-        mirror.set_transient(201, 100);
-        mirror.set_transient(202, 100);
+        mirror.set_transient(&mut &backend, 201, 100).unwrap();
+        mirror.set_transient(&mut &backend, 202, 100).unwrap();
 
         // Focus unrelated -- both children must stay above parent.
         mirror.raise_in_level(&mut &backend, 300).unwrap();

@@ -216,11 +216,18 @@ impl DaemonApp {
                 && let Some(parent_xid) = client.transient_for
             {
                 let child_xid = self.xid(node);
-                self.state
-                    .stacking_order
-                    .set_transient(child_xid, parent_xid);
+                let mut backend = super::monitors::X11StackBackend::new(x11);
+                let result = self.state.stacking_order.set_transient(
+                    &mut backend,
+                    child_xid,
+                    parent_xid,
+                );
+                self.complete_stack_operation(backend, result)?;
             }
         }
+        let mut backend = super::monitors::X11StackBackend::new(x11);
+        let result = self.state.stacking_order.reconcile(&mut backend);
+        self.complete_stack_operation(backend, result)?;
         self.refresh_colors(x11)?;
         for monitor in self.world().monitor_order().to_vec() {
             if let Some(desktop) = self.world().monitor(monitor).active_desktop {

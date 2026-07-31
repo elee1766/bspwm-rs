@@ -675,6 +675,20 @@ impl CommandHandler<'_> {
     /// Drops the stores' references to a removed monitor or desktop, and frees
     /// the tree nodes the removal orphaned.
     pub(super) fn purge_removal(&mut self, removal: &crate::world::Removal) {
+        let removed_windows: Vec<_> = removal
+            .roots
+            .iter()
+            .flat_map(|root| self.state.world.tree.leaves(*root))
+            .filter_map(|node| {
+                self.state
+                    .world
+                    .tree
+                    .node(node)
+                    .client
+                    .as_ref()
+                    .map(|_| self.state.world.tree.node(node).external_id)
+            })
+            .collect();
         for (desktop, _) in &removal.desktops {
             self.state.history.remove_desktop(*desktop);
         }
@@ -692,6 +706,39 @@ impl CommandHandler<'_> {
             // The desktops that held these trees are gone, so nothing else will
             // ever reach them. Upstream `free`s them here too.
             self.state.world.tree.destroy_subtree(*root);
+        }
+        let surviving_clients: Vec<_> = self
+            .state
+            .world
+            .roots()
+            .flat_map(|(_, _, root)| self.state.world.tree.leaves(root))
+            .filter(|node| self.state.world.tree.node(*node).client.is_some())
+            .collect();
+        for node in surviving_clients {
+            if self
+                .state
+                .world
+                .tree
+                .node(node)
+                .client
+                .as_ref()
+                .and_then(|client| client.transient_for)
+                .is_some_and(|parent| removed_windows.contains(&parent))
+            {
+                self.state
+                    .world
+                    .tree
+                    .node_mut(node)
+                    .client
+                    .as_mut()
+                    .unwrap()
+                    .transient_for = None;
+            }
+        }
+        if !removal.roots.is_empty() {
+            self.state
+                .pending_effects
+                .push(CommandEffect::ReconcileStack);
         }
         self.state.forget_retired_nodes();
     }

@@ -274,11 +274,13 @@ impl XEventContext<'_> {
             if globally_focused == Some(node) {
                 // Upstream stacks the already-focused node on click under FFP.
                 if self.app.state.settings.focus_follows_pointer {
-                    let mut backend = super::monitors::X11StackBackend { x11: self.x11 };
-                    self.app
+                    let mut backend = super::monitors::X11StackBackend::new(self.x11);
+                    let result = self
+                        .app
                         .state
                         .stacking_order
-                        .raise_in_level(&mut backend, self.xid(node))?;
+                        .raise_in_level(&mut backend, self.xid(node));
+                    self.app.complete_stack_operation(backend, result)?;
                     if let Some(desktop_id) = self.app.world().node_desktop(node) {
                         self.app.sync_stacking_ewmh(self.x11, desktop_id)?;
                     }

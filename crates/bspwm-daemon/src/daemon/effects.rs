@@ -216,7 +216,6 @@ impl DaemonApp {
                         self.world().desktop(desktop).tree.focus == Some(node)
                     });
                     let clients = self.client_nodes(node);
-                    let mut backend = super::monitors::X11StackBackend { x11 };
                     for client_node in clients {
                         let client = self.client(client_node);
                         if !crate::stack::stacking_enabled(client, auto_raise) {
@@ -224,11 +223,28 @@ impl DaemonApp {
                         }
                         let xid = self.xid(client_node);
                         let level = crate::stack::stack_level(client);
-                        self.state
+                        let mut backend = super::monitors::X11StackBackend::new(x11);
+                        let result = self
+                            .state
                             .stacking_order
-                            .set_level(&mut backend, xid, level, focused)?;
+                            .set_level(&mut backend, xid, level, focused);
+                        self.complete_stack_operation(backend, result)?;
                     }
                     if let Some(desktop) = self.world().node_desktop(node) {
+                        self.sync_stacking_ewmh(x11, desktop)?;
+                    }
+                }
+                CommandEffect::ReconcileStack => {
+                    let mut backend = super::monitors::X11StackBackend::new(x11);
+                    let result = self.state.stacking_order.reconcile(&mut backend);
+                    self.complete_stack_operation(backend, result)?;
+                    let active_desktops: Vec<_> = self
+                        .world()
+                        .monitor_order()
+                        .iter()
+                        .filter_map(|monitor| self.world().monitor(*monitor).active_desktop)
+                        .collect();
+                    for desktop in active_desktops {
                         self.sync_stacking_ewmh(x11, desktop)?;
                     }
                 }
@@ -341,19 +357,20 @@ impl DaemonApp {
                         self.sync_window_state(x11, old)?;
                     }
                     {
-                        let mut backend = super::monitors::X11StackBackend { x11 };
                         if let Some(node) = node {
                             if let Some(client) = self.client_of(node) {
                                 let xid = self.xid(node);
                                 let level = crate::stack::stack_level(client);
                                 if auto_raise || client.state != crate::types::ClientState::Floating
                                 {
-                                    self.state.stacking_order.set_level(
+                                    let mut backend = super::monitors::X11StackBackend::new(x11);
+                                    let result = self.state.stacking_order.set_level(
                                         &mut backend,
                                         xid,
                                         level,
                                         true,
-                                    )?;
+                                    );
+                                    self.complete_stack_operation(backend, result)?;
                                 }
                             }
                             self.sync_stacking_ewmh(x11, desktop)?;

@@ -1,0 +1,29 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+first=$(add_test_window stack-sub-first ScenarioNodeStack)
+second=$(add_test_window stack-sub-second ScenarioNodeStack)
+$BSPC node "$first" --state floating
+$BSPC node "$second" --state floating
+
+events=$TEST_TMP/node-stack-subscription.events
+fifo=$($BSPC subscribe --fifo --count 2 node_stack)
+cat "$fifo" > "$events" &
+reader_pid=$!
+
+# The second window starts focused. Raising the first emits `above`; moving the
+# unfocused second window to the below layer emits `below`.
+$BSPC node "$first" --focus
+$BSPC node "$second" --layer below
+
+poll_until 100 0.05 process_exited "$reader_pid" \
+	|| fail "node_stack subscription did not reach its exact count"
+wait "$reader_pid"
+
+assert_eq 2 "$(wc -l < "$events" | tr -d ' ')" "node_stack event count"
+assert_eq 1 "$(grep -c '^node_stack .* above ' "$events")" "node_stack above count"
+assert_eq 1 "$(grep -c '^node_stack .* below ' "$events")" "node_stack below count"
+
+close_test_window "$second"
+close_test_window "$first"
