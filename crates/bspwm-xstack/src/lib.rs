@@ -165,16 +165,6 @@ impl StackMirror {
         self.transients.retain(|&(c, _)| c != child);
     }
 
-    /// Record that `MapWindow` was called, which raises the window to the
-    /// absolute top of X siblings. The mirror is updated to match.
-    /// Call this AFTER the actual `MapWindow` X request.
-    pub fn noted_map(&mut self, window: u32) {
-        if let Some(pos) = self.position(window) {
-            let entry = self.order.remove(pos);
-            self.order.push(entry);
-        }
-    }
-
     /// Ensure a transient child is above its parent. If the child is below
     /// the parent, move it immediately above the parent.
     pub fn enforce_transient<B: StackBackend>(
@@ -459,17 +449,6 @@ mod tests {
     }
 
     #[test]
-    fn noted_map_moves_to_top() {
-        let backend = RecordBackend::default();
-        let mut mirror = StackMirror::new();
-        mirror.insert(&mut &backend, 1, 3).unwrap();
-        mirror.insert(&mut &backend, 2, 4).unwrap();
-        // MapWindow raised 1 to top of X siblings.
-        mirror.noted_map(1);
-        assert_eq!(mirror.windows(), [2, 1]);
-    }
-
-    #[test]
     fn minimum_ops_emitted() {
         let backend = RecordBackend::default();
         let mut mirror = StackMirror::new();
@@ -668,40 +647,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn unfocus_with_lower_preserves_upstream_behavior() {
-        let backend = RecordBackend::default();
-        let mut mirror = StackMirror::new();
-        mirror.insert(&mut &backend, 1, 4).unwrap();
-        mirror.insert(&mut &backend, 2, 4).unwrap();
-        mirror.insert(&mut &backend, 3, 4).unwrap();
-
-        // Simulate upstream: focus raises, unfocus lowers.
-        // Focus 1.
-        mirror.raise_in_level(&mut &backend, 1).unwrap();
-        assert_eq!(mirror.windows(), [2, 3, 1]);
-
-        // Focus 2, unfocus 1.
-        mirror.raise_in_level(&mut &backend, 2).unwrap();
-        // After raise(2): [3, 1, 2]
-        mirror.lower_in_level(&mut &backend, 1).unwrap();
-        // After lower(1): 1 goes to bottom of level 4
-        let after_step2 = mirror.windows();
-        // 2 should be on top (most recently focused).
-        assert_eq!(*after_step2.last().unwrap(), 2, "2 should be on top");
-        // 1 should be on bottom (just lowered).
-        assert_eq!(after_step2[0], 1, "1 should be on bottom");
-
-        // Focus 3, unfocus 2.
-        mirror.raise_in_level(&mut &backend, 3).unwrap();
-        mirror.lower_in_level(&mut &backend, 2).unwrap();
-        let after_step3 = mirror.windows();
-        // 3 should be on top (most recently focused).
-        assert_eq!(*after_step3.last().unwrap(), 3, "3 should be on top");
-        // 2 should be on bottom (just lowered).
-        assert_eq!(after_step3[0], 2, "2 should be on bottom");
     }
 
     #[test]

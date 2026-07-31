@@ -23,6 +23,14 @@ https://github.com/baskerville/bspwm/pull/1362 should be fixed here, because the
 
 we have support for _NET_WM_MOVERESIZE https://github.com/baskerville/bspwm/pull/1183
 
+## extra features and major differences
+
+i added support for syncronization in resize. i dont know what really supports this though? need to test more
+
+i also changed the underlying stacking logic. the hope is the new logic is more maintainable.
+
+it might cause some incompatiblities with how bspwm does stacking. please point these out and i can attempt to address them.
+
 ## installation
 
 i might setup builds and releases later but i dont really want to rn

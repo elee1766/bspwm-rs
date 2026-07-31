@@ -511,6 +511,7 @@ impl DaemonApp {
         } else {
             None
         };
+        let focused = focus_client.is_some();
         Self::execute_plan(x11, &plan)?;
         if let Some((input_hint, take_focus)) = focus_client {
             window::focus_client(x11, window_id_typed, input_hint, take_focus)?;
@@ -525,18 +526,24 @@ impl DaemonApp {
             (
                 self.xid(node),
                 crate::stack::stack_level(client),
+                crate::stack::stacking_enabled(client, self.state.auto_raise),
                 client.transient_for,
             )
         });
-        if let Some((window_id, level, transient_for)) = stack_info {
+        if let Some((window_id, level, stacking_enabled, transient_for)) = stack_info {
             let mut backend = super::monitors::X11StackBackend { x11 };
-            self.state
-                .stacking_order
-                .insert(&mut backend, window_id, level)?;
             if let Some(parent_xid) = transient_for {
                 self.state
                     .stacking_order
                     .set_transient(window_id, parent_xid);
+            }
+            // Upstream stack() skips floating clients while auto_raise is
+            // disabled. Other new clients are placed at the top of their
+            // level when focused and at the bottom otherwise.
+            if stacking_enabled {
+                self.state
+                    .stacking_order
+                    .set_level(&mut backend, window_id, level, focused)?;
             }
         }
         self.sync_stacking_ewmh(x11, desktop)?;

@@ -222,19 +222,6 @@ impl DaemonApp {
             }
         }
         self.refresh_colors(x11)?;
-        // Apply the restored stacking order to X. Walk bottom-to-top and
-        // stack each window above the previous one, reproducing the exact
-        // saved order rather than re-raising by level.
-        {
-            let windows = self.state.stacking_order.windows();
-            for pair in windows.windows(2) {
-                window::stack_above(
-                    x11,
-                    xcb::x::Window::new(pair[1]),
-                    xcb::x::Window::new(pair[0]),
-                )?;
-            }
-        }
         for monitor in self.world().monitor_order().to_vec() {
             if let Some(desktop) = self.world().monitor(monitor).active_desktop {
                 self.sync_stacking_ewmh(x11, desktop)?;

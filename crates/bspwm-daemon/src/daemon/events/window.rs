@@ -484,7 +484,9 @@ impl XEventContext<'_> {
                 .handle_wm_moveresize(monitor, desktop, node, root_x, root_y, direction, button)?,
             events::EwmhClientMessage::RestackWindow => {
                 let focused = self.world().desktop(desktop).tree.focus == Some(node);
-                if let Some(client) = self.client_of(node) {
+                if let Some(client) = self.client_of(node)
+                    && crate::stack::stacking_enabled(client, self.app.state.auto_raise)
+                {
                     let xid = self.xid(node);
                     let level = crate::stack::stack_level(client);
                     let mut backend = crate::daemon::monitors::X11StackBackend { x11: self.x11 };

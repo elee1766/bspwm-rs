@@ -52,14 +52,8 @@ impl DaemonApp {
                     .flatten()
             });
             if has_client {
-                let actually_visible = visible && !hidden;
                 if !visible || !hidden {
-                    window::set_visibility(x11, x::Window::new(window), actually_visible)?;
-                }
-                // MapWindow implicitly raises the window to the X stack top.
-                // Inform the mirror so it stays in sync.
-                if actually_visible {
-                    self.state.stacking_order.noted_map(window);
+                    window::set_visibility(x11, x::Window::new(window), visible && !hidden)?;
                 }
                 if let Some(client) = self.node_mut(node).client.as_mut() {
                     client.shown = visible;
@@ -74,35 +68,6 @@ impl DaemonApp {
             if let Some(first) = children.0 {
                 stack.push(first);
             }
-        }
-        Ok(())
-    }
-
-    /// Re-applies the correct stacking order for all client windows under
-    /// `root` after their `MapWindow` calls displaced the mirror.
-    ///
-    /// Upstream bspwm calls `stack(mon, n, true)` for every node after
-    /// `show_desktop`. This is the equivalent: each client is restacked
-    /// at the bottom of its level (unfocused placement), which restores
-    /// the level-based ordering the mirror expects.
-    fn restack_desktop_clients(
-        &mut self,
-        x11: &X11,
-        root: NodeId,
-    ) -> Result<(), RuntimeError> {
-        let clients: Vec<_> = self.client_nodes(root);
-        let mut backend = super::monitors::X11StackBackend { x11 };
-        for node in clients {
-            let level = {
-                let Some(client) = self.client_of(node) else {
-                    continue;
-                };
-                crate::stack::stack_level(client)
-            };
-            let xid = self.xid(node);
-            self.state
-                .stacking_order
-                .set_level(&mut backend, xid, level, false)?;
         }
         Ok(())
     }
@@ -250,30 +215,18 @@ impl DaemonApp {
                     let focused = self.world().node_desktop(node).is_some_and(|desktop| {
                         self.world().desktop(desktop).tree.focus == Some(node)
                     });
-                    if let Some(client) = self.client_of(node) {
-                        let xid = self.xid(node);
-                        let level = crate::stack::stack_level(client);
-                        let mut backend = super::monitors::X11StackBackend { x11 };
-                        if focused
-                            || auto_raise
-                            || client.state != crate::types::ClientState::Floating
-                        {
-                            if focused {
-                                self.state.stacking_order.set_level(
-                                    &mut backend,
-                                    xid,
-                                    level,
-                                    true,
-                                )?;
-                            } else {
-                                self.state.stacking_order.set_level(
-                                    &mut backend,
-                                    xid,
-                                    level,
-                                    false,
-                                )?;
-                            }
+                    let clients = self.client_nodes(node);
+                    let mut backend = super::monitors::X11StackBackend { x11 };
+                    for client_node in clients {
+                        let client = self.client(client_node);
+                        if !crate::stack::stacking_enabled(client, auto_raise) {
+                            continue;
                         }
+                        let xid = self.xid(client_node);
+                        let level = crate::stack::stack_level(client);
+                        self.state
+                            .stacking_order
+                            .set_level(&mut backend, xid, level, focused)?;
                     }
                     if let Some(desktop) = self.world().node_desktop(node) {
                         self.sync_stacking_ewmh(x11, desktop)?;
@@ -283,9 +236,6 @@ impl DaemonApp {
                 CommandEffect::SetWindowVisibility { node, visible } => {
                     if let Some(desktop) = self.world().node_desktop(node) {
                         self.set_subtree_visibility(x11, desktop, node, visible)?;
-                        if visible {
-                            self.restack_desktop_clients(x11, node)?;
-                        }
                         for client in self.client_nodes(node) {
                             self.sync_window_state(x11, client)?;
                         }
@@ -304,9 +254,6 @@ impl DaemonApp {
                         let result = self.set_subtree_visibility(x11, desktop, root, visible);
                         self.state.hide_sticky = hide_sticky;
                         result?;
-                        if visible {
-                            self.restack_desktop_clients(x11, root)?;
-                        }
                     }
                 }
                 CommandEffect::CreateMonitorRoot { monitor: id } => {
@@ -374,12 +321,6 @@ impl DaemonApp {
                     if previous_desktop != Some(desktop) {
                         if let Some(root) = self.world().desktop(desktop).tree.root {
                             self.set_subtree_visibility(x11, desktop, root, true)?;
-                            // MapWindow raised every client to the X stack top,
-                            // and noted_map updated the mirror. Restack all
-                            // clients on the newly shown desktop to restore the
-                            // correct level-based order, matching upstream's
-                            // per-node stack() calls after show_desktop.
-                            self.restack_desktop_clients(x11, root)?;
                         }
                         // The previous desktop may have been removed between
                         // queueing this focus and running it.
@@ -401,17 +342,6 @@ impl DaemonApp {
                     }
                     {
                         let mut backend = super::monitors::X11StackBackend { x11 };
-                        // Lower the previously focused node to the bottom of
-                        // its level, matching upstream's stack(mon, old, false).
-                        if let Some(old) = previous_node.filter(|old| Some(*old) != node)
-                            && self.world().tree.is_live(old)
-                            && self.client_of(old).is_some()
-                        {
-                            self.state.stacking_order.lower_in_level(
-                                &mut backend,
-                                self.xid(old),
-                            )?;
-                        }
                         if let Some(node) = node {
                             if let Some(client) = self.client_of(node) {
                                 let xid = self.xid(node);

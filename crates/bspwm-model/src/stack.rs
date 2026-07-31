@@ -18,6 +18,13 @@ pub const fn stack_level(client: &Client) -> u8 {
     3 * layer + state
 }
 
+/// Whether upstream's `stack()` processes this client under the current
+/// `auto_raise` setting.
+#[must_use]
+pub const fn stacking_enabled(client: &Client, auto_raise: bool) -> bool {
+    !matches!(client.state, ClientState::Floating) || auto_raise
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -32,5 +39,21 @@ mod tests {
         client.layer = StackLayer::Above;
         client.state = ClientState::Tiled;
         assert_eq!(stack_level(&client), 6);
+    }
+
+    #[test]
+    fn floating_stacking_obeys_auto_raise() {
+        let mut client = Client::from_settings(&Settings::default());
+        for state in [
+            ClientState::Tiled,
+            ClientState::PseudoTiled,
+            ClientState::Fullscreen,
+        ] {
+            client.state = state;
+            assert!(stacking_enabled(&client, false));
+        }
+        client.state = ClientState::Floating;
+        assert!(!stacking_enabled(&client, false));
+        assert!(stacking_enabled(&client, true));
     }
 }
