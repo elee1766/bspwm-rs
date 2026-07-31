@@ -1,0 +1,29 @@
+[package]
+name = "bspwm-runtime"
+version = "0.9.12"
+edition = "2024"
+license = "BSD-2-Clause"
+description = "Daemon lifecycle, restart, signal, and event-loop runtime for bspwm-rs"
+
+[dependencies]
+bspwm-command = { version = "0.9.12", path = "../bspwm-command" }
+bspwm-ipc = { version = "0.9.12", path = "../bspwm-ipc" }
+bspwm-state = { version = "0.9.12", path = "../bspwm-state" }
+bspwm-x11 = { version = "0.9.12", path = "../bspwm-x11" }
+listenfd = "1.0.2"
+log = "0.4"
+mio = { version = "1", features = ["os-poll", "os-ext"] }
+nix = { version = "0.30", features = ["process", "signal"] }
+signal-hook = "0.4.4"
+thiserror = "2"
+xcb = "1.7.0"
+
+[dev-dependencies]
+bspwm-core = { version = "0.9.12", path = "../bspwm-core" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

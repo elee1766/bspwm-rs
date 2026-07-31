@@ -110,15 +110,13 @@ dependencies = [
  "bspwm-core",
  "bspwm-ipc",
  "bspwm-model",
+ "bspwm-runtime",
  "bspwm-state",
+ "bspwm-x11",
  "bspwm-xstack",
- "listenfd",
  "log",
- "mio",
  "nix",
  "serde_json",
- "signal-hook",
- "thiserror",
  "xcb",
 ]
 
@@ -151,6 +149,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bspwm-runtime"
+version = "0.9.12"
+dependencies = [
+ "bspwm-command",
+ "bspwm-core",
+ "bspwm-ipc",
+ "bspwm-state",
+ "bspwm-x11",
+ "listenfd",
+ "log",
+ "mio",
+ "nix",
+ "signal-hook",
+ "thiserror",
+ "xcb",
+]
+
+[[package]]
 name = "bspwm-state"
 version = "0.9.12"
 dependencies = [
@@ -160,6 +176,17 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "bspwm-x11"
+version = "0.9.12"
+dependencies = [
+ "bspwm-core",
+ "bspwm-model",
+ "bspwm-xstack",
+ "thiserror",
+ "xcb",
 ]
 
 [[package]]

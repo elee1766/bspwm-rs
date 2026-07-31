@@ -531,7 +531,7 @@ pub fn unmap(x11: &X11, window: x::Window) -> xcb::ProtocolResult<()> {
 
 /// Maps or unmaps without letting the WM consume its own `UnmapNotify`.
 pub fn set_visibility(x11: &X11, window: x::Window, visible: bool) -> xcb::ProtocolResult<()> {
-    let quiet_mask = crate::runtime::ROOT_EVENT_MASK.difference(x::EventMask::SUBSTRUCTURE_NOTIFY);
+    let quiet_mask = crate::ROOT_EVENT_MASK.difference(x::EventMask::SUBSTRUCTURE_NOTIFY);
     x11.send_and_check_request(&x::ChangeWindowAttributes {
         window: x11.root(),
         value_list: &[x::Cw::EventMask(quiet_mask)],
@@ -552,7 +552,7 @@ pub fn set_visibility(x11: &X11, window: x::Window, visible: bool) -> xcb::Proto
     };
     let restore = x11.send_and_check_request(&x::ChangeWindowAttributes {
         window: x11.root(),
-        value_list: &[x::Cw::EventMask(crate::runtime::ROOT_EVENT_MASK)],
+        value_list: &[x::Cw::EventMask(crate::ROOT_EVENT_MASK)],
     });
     request.and(restore)
 }

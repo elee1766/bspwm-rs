@@ -453,8 +453,7 @@ pub fn client_list_payload(world: &World) -> Vec<x::Window> {
     world
         .roots()
         .flat_map(|(_, _, root)| {
-            client_leaves(world, root)
-                .map(|node| x::Window::new(world.tree.node(node).external_id))
+            client_leaves(world, root).map(|node| x::Window::new(world.tree.node(node).external_id))
         })
         .collect()
 }
@@ -462,11 +461,7 @@ pub fn client_list_payload(world: &World) -> Vec<x::Window> {
 /// Builds `_NET_CLIENT_LIST_STACKING` from bottom to top.
 #[must_use]
 pub fn client_stacking_payload(stacking: &bspwm_xstack::StackMirror) -> Vec<x::Window> {
-    stacking
-        .windows()
-        .into_iter()
-        .map(x::Window::new)
-        .collect()
+    stacking.windows().into_iter().map(x::Window::new).collect()
 }
 
 /// Writes `_NET_CLIENT_LIST` on the root window.

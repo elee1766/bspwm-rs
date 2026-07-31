@@ -30,6 +30,7 @@ use xcb::x;
 
 use bspwm_ipc::{BUFFER_SIZE, FAILURE_MESSAGE};
 pub use bspwm_ipc::{SocketListener, UnixResponse, receive_request};
+pub use bspwm_x11::ROOT_EVENT_MASK;
 
 use crate::common::state_path_from_env;
 use crate::ewmh;
@@ -43,13 +44,6 @@ pub const WM_NAME: &str = "bspwm";
 pub const CONFIG_NAME: &str = "bspwmrc";
 pub const DEFAULT_IDLE_INTERVAL: Duration = Duration::from_millis(10);
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(5);
-
-pub(crate) const ROOT_EVENT_MASK: x::EventMask = x::EventMask::SUBSTRUCTURE_REDIRECT
-    .union(x::EventMask::SUBSTRUCTURE_NOTIFY)
-    .union(x::EventMask::STRUCTURE_NOTIFY)
-    .union(x::EventMask::BUTTON_PRESS)
-    .union(x::EventMask::PROPERTY_CHANGE)
-    .union(x::EventMask::FOCUS_CHANGE);
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RuntimeOptions {
