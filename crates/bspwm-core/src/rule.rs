@@ -413,3 +413,230 @@ fn parse_float_prefix(input: &str) -> Option<f64> {
 const fn on_off(value: bool) -> &'static str {
     if value { "on" } else { "off" }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::float_cmp, clippy::field_reassign_with_default)]
+
+    use super::*;
+
+    fn rule(cause: &str, effect: &str, one_shot: bool) -> Rule {
+        Rule::from_cause(cause, effect, one_shot)
+    }
+
+    #[test]
+    fn constructors_match_upstream_defaults() {
+        assert_eq!(Rule::default(), Rule::default());
+        let consequence = RuleConsequence::default();
+        assert!(consequence.manage);
+        assert!(consequence.focus);
+        assert!(consequence.border);
+        assert_eq!(consequence.honor_size_hints, HonorSizeHintsMode::Default);
+        assert_eq!(consequence.split_ratio, 0.0);
+        assert_eq!(consequence.state, None);
+        assert_eq!(consequence.rect, None);
+    }
+
+    #[test]
+    fn cause_construction_unescapes_colons_and_defaults_omitted_fields() {
+        assert_eq!(
+            Rule::from_cause(r"XTerm:term\:special", "focus=off", false),
+            Rule {
+                class_name: "XTerm".into(),
+                instance_name: "term:special".into(),
+                name: MATCH_ANY.into(),
+                effect: "focus=off".into(),
+                one_shot: false,
+            }
+        );
+    }
+
+    #[test]
+    fn rules_are_ordered_and_list_format_matches_upstream() {
+        let mut rules = RuleList::default();
+        rules.add_rule(rule("A:*:*", "focus=off", false));
+        rules.add_rule(rule("B:b:title", "state=floating", true));
+        assert_eq!(
+            rules.list_rules(),
+            "A:*:* => focus=off\nB:b:title -> state=floating\n"
+        );
+        assert_eq!(
+            rules
+                .iter()
+                .map(|rule| rule.class_name.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B"]
+        );
+    }
+
+    #[test]
+    fn removal_by_index_reports_success_and_preserves_order() {
+        let mut rules = RuleList::default();
+        for class in ["A", "B", "C"] {
+            let cause = format!("{class}:*:*");
+            rules.add_rule(rule(&cause, "", false));
+        }
+        assert!(rules.remove_rule_by_index(1));
+        assert!(!rules.remove_rule_by_index(9));
+        assert_eq!(
+            rules
+                .iter()
+                .map(|rule| rule.class_name.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "C"]
+        );
+        assert_eq!(rules.remove_rule(0).unwrap().class_name, "A");
+    }
+
+    #[test]
+    fn removal_by_cause_uses_only_exact_fields_or_a_whole_field_wildcard() {
+        let mut rules = RuleList::default();
+        rules.add_rule(rule("Firefox:main:Docs", "", false));
+        rules.add_rule(rule("Firefox:private:Docs", "", false));
+        rules.add_rule(rule("Fire*:main:Docs", "", false));
+        rules.remove_rule_by_cause("Firefox:*:Docs");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules.iter().next().unwrap().class_name, "Fire*");
+    }
+
+    #[test]
+    fn parse_keys_values_has_strtok_pairing_and_ignores_a_dangling_key() {
+        let mut consequence = RuleConsequence::default();
+        parse_keys_values(
+            "monitor=one, desktop two\nstate=floating focus=off dangling",
+            &mut consequence,
+        );
+        assert_eq!(consequence.monitor_desc, "one");
+        assert_eq!(consequence.desktop_desc, "two");
+        assert_eq!(consequence.state, Some(ClientState::Floating));
+        assert!(!consequence.focus);
+    }
+
+    #[test]
+    fn parse_key_value_covers_typed_and_boolean_consequences() {
+        let mut consequence = RuleConsequence::default();
+        parse_keys_values(
+            "split_dir=west layer=above split_ratio=0.625junk rectangle=80x60+-2+3 honor_size_hints=tiled hidden=on sticky=true private=off locked=true marked=on center=true follow=off manage=false focus=off border=false",
+            &mut consequence,
+        );
+        assert_eq!(consequence.split_dir, Some(Direction::West));
+        assert_eq!(consequence.layer, Some(StackLayer::Above));
+        assert_eq!(consequence.split_ratio, 0.625);
+        assert_eq!(consequence.rect, Some(Rectangle::new(-2, 3, 80, 60)));
+        assert_eq!(consequence.honor_size_hints, HonorSizeHintsMode::Tiled);
+        assert!(consequence.hidden && consequence.sticky && consequence.locked);
+        assert!(consequence.marked && consequence.center);
+        assert!(!consequence.private || consequence.follow || consequence.manage);
+        assert!(!consequence.focus && !consequence.border);
+    }
+
+    #[test]
+    fn invalid_values_follow_upstream_reset_and_preservation_rules() {
+        let mut consequence = RuleConsequence::default();
+        consequence.state = Some(ClientState::Tiled);
+        consequence.split_ratio = 0.4;
+        consequence.rect = Some(Rectangle::default());
+        consequence.honor_size_hints = HonorSizeHintsMode::Yes;
+        parse_keys_values(
+            "state=invalid split_ratio=1 rectangle=invalid honor_size_hints=invalid focus=invalid",
+            &mut consequence,
+        );
+        assert_eq!(consequence.state, Some(ClientState::Tiled));
+        assert_eq!(consequence.split_ratio, 0.4);
+        assert_eq!(consequence.rect, None);
+        assert_eq!(consequence.honor_size_hints, HonorSizeHintsMode::Default);
+        assert!(consequence.focus);
+    }
+
+    #[test]
+    fn applying_rules_matches_exactly_and_one_shot_removes_then_stops() {
+        let mut rules = RuleList::default();
+        rules.add_rule(rule("App:*:*", "focus=off", false));
+        rules.add_rule(rule("App:main:*", "state=floating", true));
+        rules.add_rule(rule("App:*:*", "border=off", false));
+        let mut consequence = RuleConsequence::default();
+        consequence.set_window_properties(&WindowProperties::new("App", "main", "title"));
+
+        rules.apply_rules(&mut consequence);
+        assert!(!consequence.focus);
+        assert_eq!(consequence.state, Some(ClientState::Floating));
+        assert!(consequence.border);
+        assert_eq!(rules.len(), 2);
+
+        rules.apply_rules(&mut consequence);
+        assert!(!consequence.border);
+    }
+
+    #[test]
+    fn later_rules_override_matching_wildcard_defaults() {
+        let mut rules = RuleList::default();
+        rules.add_rule(rule("*", "state=floating focus=off", false));
+        rules.add_rule(rule("App:main", "state=tiled focus=on", false));
+        let mut consequence = RuleConsequence::default();
+        consequence.set_window_properties(&WindowProperties::new("App", "main", "title"));
+
+        rules.apply_rules(&mut consequence);
+
+        assert_eq!(consequence.state, Some(ClientState::Tiled));
+        assert!(consequence.focus);
+    }
+
+    #[test]
+    fn consequence_format_matches_external_rule_protocol() {
+        let mut consequence = RuleConsequence::default();
+        parse_keys_values(
+            "monitor=one desktop=two node=three state=pseudo_tiled layer=below honor_size_hints=on split_dir=south split_ratio=0.5 hidden=on rectangle=100x80+-1+2",
+            &mut consequence,
+        );
+        assert_eq!(
+            print_rule_consequence(&consequence),
+            "monitor=one desktop=two node=three state=pseudo_tiled layer=below honor_size_hints=true split_dir=south split_ratio=0.500000 hidden=on sticky=off private=off locked=off marked=off center=off follow=off manage=on focus=on border=on rectangle=100x80+-1+2"
+        );
+        assert_eq!(
+            consequence.to_string(),
+            print_rule_consequence(&consequence)
+        );
+    }
+
+    #[test]
+    fn built_in_rules_follow_upstream_order() {
+        let mut consequence = RuleConsequence::default();
+        apply_builtin_rules(
+            &BuiltinRuleProperties {
+                window_types: vec![BuiltinWindowType::Utility, BuiltinWindowType::Dialog],
+                window_states: vec![
+                    BuiltinWindowState::Fullscreen,
+                    BuiltinWindowState::Below,
+                    BuiltinWindowState::Sticky,
+                ],
+                transient: true,
+                ..BuiltinRuleProperties::default()
+            },
+            true,
+            &mut consequence,
+        );
+        assert!(!consequence.focus);
+        assert_eq!(consequence.state, Some(ClientState::Floating));
+        assert_eq!(consequence.layer, Some(StackLayer::Below));
+        assert!(consequence.center && consequence.sticky);
+    }
+
+    #[test]
+    fn dialog_layer_setting_precedes_user_rule_effects() {
+        let properties = BuiltinRuleProperties {
+            window_types: vec![BuiltinWindowType::Dialog],
+            ..BuiltinRuleProperties::default()
+        };
+
+        let mut disabled = RuleConsequence::default();
+        apply_builtin_rules(&properties, false, &mut disabled);
+        assert_eq!(disabled.state, Some(ClientState::Floating));
+        assert_eq!(disabled.layer, None);
+
+        let mut enabled = RuleConsequence::default();
+        apply_builtin_rules(&properties, true, &mut enabled);
+        assert_eq!(enabled.layer, Some(StackLayer::Above));
+        parse_keys_values("layer=below", &mut enabled);
+        assert_eq!(enabled.layer, Some(StackLayer::Below));
+    }
+}

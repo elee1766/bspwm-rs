@@ -4,12 +4,15 @@
 
 mod action;
 mod effects;
+pub mod entrypoint;
 mod events;
+pub(crate) mod external_rules;
 mod feedback;
 mod manage;
 mod monitors;
 mod persist;
 mod status;
+mod startup;
 #[cfg(test)]
 mod test_support;
 
@@ -69,7 +72,7 @@ pub struct DaemonApp {
     pending_rules: Vec<PendingRule>,
     reaping_rules: Vec<crate::rule::ExternalRuleProcess>,
     restored_subscribers: Vec<restore::RestoredSubscriber>,
-    startup: crate::startup::StartupTracker,
+    startup: startup::StartupTracker,
     last_user_time: Option<x::Timestamp>,
     user_time_windows: HashMap<u32, u32>,
     sync_request_clients: HashMap<u32, sync::Counter>,
@@ -261,7 +264,7 @@ impl DaemonApp {
             pending_rules: Vec::new(),
             reaping_rules: Vec::new(),
             restored_subscribers: Vec::new(),
-            startup: crate::startup::StartupTracker::default(),
+            startup: startup::StartupTracker::default(),
             last_user_time: None,
             user_time_windows: HashMap::new(),
             sync_request_clients: HashMap::new(),

@@ -4,7 +4,7 @@ use xcb::{Xid, XidNew, sync, x};
 
 use super::action::XAction;
 use super::events::XEventContext;
-use super::{DaemonApp, WindowLocation};
+use super::{DaemonApp, WindowLocation, timestamp_is_later};
 use crate::events::EventHandler;
 use crate::ewmh;
 use crate::monitor;
@@ -56,6 +56,21 @@ pub struct ClientInitial {
     startup_id: Option<String>,
     sync_request_counter: Option<sync::Counter>,
     transient_for: Option<u32>,
+}
+
+impl From<&window::RuleWindowProperties> for ClientInitial {
+    fn from(properties: &window::RuleWindowProperties) -> Self {
+        Self {
+            icccm: properties.icccm,
+            urgent: properties.urgent,
+            wm_flags: properties.wm_flags,
+            user_time: properties.user_time,
+            user_time_window: properties.user_time_window,
+            startup_id: properties.startup_id.clone(),
+            sync_request_counter: properties.sync_request_counter,
+            transient_for: properties.transient_for,
+        }
+    }
 }
 
 impl DaemonApp {
@@ -369,6 +384,7 @@ impl DaemonApp {
             .builtin
             .window_types
             .contains(&crate::rule::BuiltinWindowType::Desktop);
+        let client_initial = ClientInitial::from(&properties);
         apply_builtin_rules(
             &properties.builtin,
             self.state.settings.put_dialogs_above,
@@ -388,16 +404,7 @@ impl DaemonApp {
                     consequence,
                     initial_rectangle: properties.geometry.rectangle,
                     size_hints: properties.size_hints,
-                    client_initial: ClientInitial {
-                        icccm: properties.icccm,
-                        urgent: properties.urgent,
-                        wm_flags: properties.wm_flags,
-                        user_time: properties.user_time,
-                        user_time_window: properties.user_time_window,
-                        startup_id: properties.startup_id,
-                        sync_request_counter: properties.sync_request_counter,
-                        transient_for: properties.transient_for,
-                    },
+                    client_initial,
                     desktop_window,
                     process,
                     events: Vec::new(),
@@ -412,16 +419,7 @@ impl DaemonApp {
             &consequence,
             properties.geometry.rectangle,
             properties.size_hints,
-            &ClientInitial {
-                icccm: properties.icccm,
-                urgent: properties.urgent,
-                wm_flags: properties.wm_flags,
-                user_time: properties.user_time,
-                user_time_window: properties.user_time_window,
-                startup_id: properties.startup_id,
-                sync_request_counter: properties.sync_request_counter,
-                transient_for: properties.transient_for,
-            },
+            &client_initial,
             desktop_window,
         )
     }
@@ -849,10 +847,6 @@ impl DaemonApp {
         }
         Some((monitor, desktop))
     }
-}
-
-fn timestamp_is_later(candidate: x::Timestamp, reference: x::Timestamp) -> bool {
-    candidate.wrapping_sub(reference).cast_signed() > 0
 }
 
 #[cfg(test)]

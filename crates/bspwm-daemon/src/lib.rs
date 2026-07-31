@@ -6,6 +6,5 @@ pub use bspwm_runtime::{common, runtime};
 pub use bspwm_state::{query, restore, state};
 pub use bspwm_x11::{events, ewmh, monitor, pointer, window, x11};
 pub mod daemon;
-pub mod entrypoint;
+pub use daemon::entrypoint;
 pub mod rule;
-mod startup;

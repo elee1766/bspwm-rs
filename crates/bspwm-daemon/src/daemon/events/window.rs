@@ -218,16 +218,7 @@ impl XEventContext<'_> {
         &mut self,
         event: &x::DestroyNotifyEvent,
     ) -> Result<(), RuntimeError> {
-        self.cancel_grab_for_window(event.window().resource_id())?;
-        let location = self.app.forget_window(event.window().resource_id());
-        let mut backend = crate::daemon::monitors::X11StackBackend::new(self.x11);
-        let result = self
-            .app
-            .state
-            .stacking_order
-            .reconcile(&mut backend);
-        self.app.complete_stack_operation(backend, result)?;
-        self.arrange_and_publish(location)
+        self.forget_and_reconcile(event.window().resource_id())
     }
 
     pub(super) fn on_unmap_notify(
@@ -248,14 +239,14 @@ impl XEventContext<'_> {
             return Ok(());
         }
         set_wm_state_property(self.x11, event.window(), 0)?;
-        self.cancel_grab_for_window(event.window().resource_id())?;
-        let location = self.app.forget_window(event.window().resource_id());
+        self.forget_and_reconcile(event.window().resource_id())
+    }
+
+    fn forget_and_reconcile(&mut self, window: u32) -> Result<(), RuntimeError> {
+        self.cancel_grab_for_window(window)?;
+        let location = self.app.forget_window(window);
         let mut backend = crate::daemon::monitors::X11StackBackend::new(self.x11);
-        let result = self
-            .app
-            .state
-            .stacking_order
-            .reconcile(&mut backend);
+        let result = self.app.state.stacking_order.reconcile(&mut backend);
         self.app.complete_stack_operation(backend, result)?;
         self.arrange_and_publish(location)
     }
