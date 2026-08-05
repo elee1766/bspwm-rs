@@ -1348,7 +1348,7 @@ impl Tree {
 
     #[must_use]
     pub fn is_focusable(&self, root: NodeId) -> bool {
-        self.first_focusable_leaf(root).is_some()
+        self.is_live(root) && self.first_focusable_leaf(root).is_some()
     }
 
     #[must_use]
@@ -2150,6 +2150,7 @@ mod tests {
         );
         assert_eq!(tree.len(), 2);
         assert!(!tree.is_live(branch));
+        assert!(!tree.is_focusable(branch));
         assert_eq!(tree.get(branch), None);
         assert!(!tree.contains(&state, branch));
         assert_eq!(tree.take_retired_nodes(), vec![branch]);
