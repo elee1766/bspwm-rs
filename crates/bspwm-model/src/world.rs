@@ -556,7 +556,9 @@ impl World {
             .node_desktop(node)
             .ok_or(StructuralError::NotAttached)?;
         if anchor == Some(node)
-            || anchor.is_some_and(|anchor| self.tree.is_descendant(anchor, node))
+            || anchor.is_some_and(|anchor| {
+                !self.tree.is_live(anchor) || self.tree.is_descendant(anchor, node)
+            })
         {
             return Err(StructuralError::InvalidAnchor);
         }
@@ -1164,6 +1166,31 @@ mod tests {
         );
         assert_eq!(world, before);
         assert_eq!(world.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_node_transfer_rejects_a_retired_anchor() {
+        let settings = Settings::default();
+        let mut world = World::default();
+        let monitor = world.create_monitor(1, None, Rectangle::new(0, 0, 100, 100), &settings);
+        let desktop = world.create_desktop(10, Some("I"), &settings);
+        assert!(world.add_desktop(monitor, desktop));
+
+        let source = world.tree.add_node(20, 0.5);
+        world.tree.node_mut(source).client = Some(crate::tree::Client::from_settings(&settings));
+        world.desktop_mut(desktop).tree = TreeState {
+            root: Some(source),
+            focus: Some(source),
+        };
+        let retired = world.tree.add_node(21, 0.5);
+        world.tree.destroy_subtree(retired);
+        let before = world.clone();
+
+        assert_eq!(
+            world.transfer_node(source, desktop, Some(retired), 0.5),
+            Err(StructuralError::InvalidAnchor)
+        );
+        assert_eq!(world, before);
     }
 
     #[test]
