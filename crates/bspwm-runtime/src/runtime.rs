@@ -6,6 +6,7 @@
 //! needs an application that implements [`MessageHandler`] and the lifecycle
 //! hooks in [`RuntimeApp`].
 
+use std::backtrace::Backtrace;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -44,6 +45,55 @@ pub const WM_NAME: &str = "bspwm";
 pub const CONFIG_NAME: &str = "bspwmrc";
 pub const DEFAULT_IDLE_INTERVAL: Duration = Duration::from_millis(10);
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct CapturedTrace(Backtrace);
+
+impl CapturedTrace {
+    fn capture() -> Self {
+        Self(Backtrace::force_capture())
+    }
+}
+
+impl std::fmt::Display for CapturedTrace {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+fn poll_dispatch_event(x11: &X11) -> Result<Option<xcb::Result<xcb::Event>>, RuntimeError> {
+    match x11.poll_for_event() {
+        Ok(None) => Ok(None),
+        Ok(Some(event)) => Ok(Some(Ok(event))),
+        Err(xcb::Error::Connection(error)) => Err(error.into()),
+        Err(error @ xcb::Error::Protocol(_)) => Ok(Some(Err(error))),
+    }
+}
+
+fn is_motion_event(item: &xcb::Result<xcb::Event>) -> bool {
+    matches!(item, Ok(xcb::Event::X(x::Event::MotionNotify(_))))
+}
+
+fn coalesce_consecutive<T, E>(
+    mut current: T,
+    replaceable: impl Fn(&T) -> bool,
+    mut poll: impl FnMut() -> Result<Option<T>, E>,
+) -> Result<(T, Option<T>), E> {
+    if !replaceable(&current) {
+        return Ok((current, None));
+    }
+    loop {
+        let Some(next) = poll()? else {
+            return Ok((current, None));
+        };
+        if replaceable(&next) {
+            current = next;
+        } else {
+            return Ok((current, Some(next)));
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RuntimeOptions {
@@ -222,12 +272,60 @@ pub enum RuntimeError {
     X11(String),
     #[error("X11 runtime error: {0}")]
     Connect(#[from] ConnectError),
-    #[error("X11 runtime error: {0}")]
-    Xcb(#[from] xcb::Error),
-    #[error("X11 runtime error: {0}")]
-    Protocol(#[from] xcb::ProtocolError),
-    #[error("X11 runtime error: {0}")]
-    Connection(#[from] xcb::ConnError),
+    #[error("X11 runtime error: {source}\n{trace}")]
+    Xcb {
+        source: xcb::Error,
+        trace: CapturedTrace,
+    },
+    #[error("X11 runtime error: {source}\n{trace}")]
+    Protocol {
+        source: xcb::ProtocolError,
+        trace: CapturedTrace,
+    },
+    #[error("X11 runtime error: {source}\n{trace}")]
+    Connection {
+        source: xcb::ConnError,
+        trace: CapturedTrace,
+    },
+}
+
+impl RuntimeError {
+    fn protocol_error(&self) -> Option<&xcb::ProtocolError> {
+        match self {
+            Self::Protocol { source, .. } | Self::Xcb {
+                source: xcb::Error::Protocol(source),
+                ..
+            } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+impl From<xcb::Error> for RuntimeError {
+    fn from(source: xcb::Error) -> Self {
+        Self::Xcb {
+            source,
+            trace: CapturedTrace::capture(),
+        }
+    }
+}
+
+impl From<xcb::ProtocolError> for RuntimeError {
+    fn from(source: xcb::ProtocolError) -> Self {
+        Self::Protocol {
+            source,
+            trace: CapturedTrace::capture(),
+        }
+    }
+}
+
+impl From<xcb::ConnError> for RuntimeError {
+    fn from(source: xcb::ConnError) -> Self {
+        Self::Connection {
+            source,
+            trace: CapturedTrace::capture(),
+        }
+    }
 }
 
 pub fn handle_stream<H: MessageHandler>(
@@ -509,6 +607,7 @@ impl<A: RuntimeApp> Runtime<A> {
     /// children are still discovered by polling.
     pub fn run(mut self) -> Result<i32, RuntimeError> {
         let mut poller = InputPoller::new(self.x11.raw_fd(), self.listener.raw_fd())?;
+        let mut pending_event = None;
         // The first pass has no readiness answer to go on, so it sweeps both.
         let mut ready = Ready::ALL;
         while self.app.running() {
@@ -528,12 +627,17 @@ impl<A: RuntimeApp> Runtime<A> {
                 // other: hand it to the dispatcher, which drops the unavoidable
                 // `BadWindow` races and reports the rest. Only a connection
                 // error is fatal.
-                let item = match self.x11.poll_for_event() {
-                    Ok(None) => break,
-                    Ok(Some(event)) => Ok(event),
-                    Err(xcb::Error::Connection(error)) => return Err(error.into()),
-                    Err(error @ xcb::Error::Protocol(_)) => Err(error),
+                let Some(item) = pending_event.take().map_or_else(
+                    || poll_dispatch_event(&self.x11),
+                    |event| Ok(Some(event)),
+                )?
+                else {
+                    break;
                 };
+                let (item, next) = coalesce_consecutive(item, is_motion_event, || {
+                    poll_dispatch_event(&self.x11)
+                })?;
+                pending_event = next;
                 did_work = true;
                 match self.app.handle_event(item, &self.x11) {
                     Ok(()) => {}
@@ -541,13 +645,13 @@ impl<A: RuntimeApp> Runtime<A> {
                     // Upstream bspwm continues after all X errors; crashing
                     // over a rejected request tears down every client's
                     // session unnecessarily.
-                    Err(
-                        RuntimeError::Protocol(ref error)
-                        | RuntimeError::Xcb(xcb::Error::Protocol(ref error)),
-                    ) => {
-                        log::warn!("protocol error during event handling: {error}");
+                    Err(error) => {
+                        if error.protocol_error().is_some() {
+                            log::warn!("protocol error during event handling: {error}");
+                        } else {
+                            return Err(error);
+                        }
                     }
-                    Err(error) => return Err(error),
                 }
             }
             if let Err(error) = self.x11.check_connection() {
@@ -630,10 +734,7 @@ impl<A: RuntimeApp> Runtime<A> {
             match result {
                 Ok((outcome, response)) => {
                     if let Err(error) = self.app.execute_pending_effects(&self.x11) {
-                        if matches!(
-                            error,
-                            RuntimeError::Protocol(_) | RuntimeError::Xcb(xcb::Error::Protocol(_))
-                        ) {
+                        if error.protocol_error().is_some() {
                             log::warn!("protocol error during effects: {error}");
                         } else {
                             if let MessageOutcome::Subscribe(subscription) = &outcome
@@ -762,6 +863,7 @@ pub fn write_request_error(stream: UnixStream, error: &io::Error) -> io::Result<
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::io::Read;
     use std::net::Shutdown;
     use std::os::fd::AsRawFd;
@@ -807,6 +909,39 @@ mod tests {
             std::process::id(),
             NEXT_PATH.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    #[test]
+    fn motion_coalescing_keeps_latest_motion_and_preserves_next_event() {
+        let mut queued = VecDeque::from([2, 3, 99]);
+        let (motion, pending) = coalesce_consecutive(
+            1,
+            |event| *event < 99,
+            || Ok::<_, ()>(queued.pop_front()),
+        )
+        .unwrap();
+
+        assert_eq!(motion, 3);
+        assert_eq!(pending, Some(99));
+        assert!(queued.is_empty());
+    }
+
+    #[test]
+    fn non_motion_event_is_dispatched_without_polling_ahead() {
+        let mut polled = false;
+        let (event, pending) = coalesce_consecutive(
+            99,
+            |candidate| *candidate < 99,
+            || {
+                polled = true;
+                Ok::<_, ()>(None)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(event, 99);
+        assert_eq!(pending, None);
+        assert!(!polled);
     }
 
     #[test]

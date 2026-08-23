@@ -282,6 +282,20 @@ fn process_command(
                 time: x::CURRENT_TIME,
             });
         }
+        "raise" | "lower" => {
+            if parts.len() != 1 {
+                return Err(format!("{command} takes no arguments"));
+            }
+            let mode = if command == "raise" {
+                x::StackMode::Above
+            } else {
+                x::StackMode::Below
+            };
+            connection.send_request(&x::ConfigureWindow {
+                window,
+                value_list: &[x::ConfigWindow::StackMode(mode)],
+            });
+        }
         "barrier" => {
             if parts.len() != 1 {
                 return Err("barrier takes no arguments".into());

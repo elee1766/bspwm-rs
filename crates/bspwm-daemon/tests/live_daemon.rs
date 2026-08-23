@@ -999,6 +999,34 @@ fn live_load_state_reconstructs_x_resources_and_client_runtime_state() {
 
 #[test]
 #[ignore = "requires a live X server selected by DISPLAY"]
+fn live_load_state_drops_clients_destroyed_during_restart() {
+    let x11 = X11::connect(None).expect("connect to DISPLAY");
+    let (mut app, _, _) = app_with_desktop();
+    RuntimeApp::setup(&mut app, &x11).expect("set up daemon runtime");
+    let client: x::Window = x11.connection().generate_id();
+    create_live_window(&x11, client, false);
+    manage_window(&mut app, client.resource_id());
+    let restored = restore::restore_state(
+        &bspwm::query::query_state(&app.state),
+        &app.state.settings,
+    )
+    .unwrap();
+    x11.send_and_check_request(&x::DestroyWindow { window: client })
+        .unwrap();
+
+    app.state.pending_effects.push(CommandEffect::LoadState {
+        restored: Box::new(restored),
+    });
+    app.execute_pending_effects(&x11).unwrap();
+
+    assert!(app.managed_window(client.resource_id()).is_none());
+    assert_eq!(app.state.clients_count, 0);
+    assert_eq!(app.state.validate(), Ok(()));
+    RuntimeApp::cleanup(&mut app, &x11).unwrap();
+}
+
+#[test]
+#[ignore = "requires a live X server selected by DISPLAY"]
 fn live_pointer_runtime_state_obeys_app_lifecycle() {
     let x11 = X11::connect(None).expect("connect to DISPLAY");
     let mut app = DaemonApp::default();
@@ -1006,6 +1034,105 @@ fn live_pointer_runtime_state_obeys_app_lifecycle() {
     assert!(app.motion_recorder.is_some());
     RuntimeApp::cleanup(&mut app, &x11).expect("clean up pointer runtime");
     assert!(app.motion_recorder.is_none());
+}
+
+#[test]
+#[ignore = "requires a live X server selected by DISPLAY"]
+fn live_binding_drag_uses_current_pointer_instead_of_stale_motion_events() {
+    let x11 = X11::connect(None).expect("connect to DISPLAY");
+    let (mut app, _, _) = app_with_desktop();
+    let client: x::Window = x11.connection().generate_id();
+    create_live_window(&x11, client, false);
+    x11.send_and_check_request(&x::MapWindow { window: client })
+        .unwrap();
+    let node = manage_window(&mut app, client.resource_id()).2;
+    let initial = Rectangle::new(10, 10, 40, 30);
+    let managed = app.state.world.tree.node_mut(node).client.as_mut().unwrap();
+    managed.state = ClientState::Floating;
+    managed.floating_rectangle = initial;
+    window::move_resize(&x11, client, initial).unwrap();
+    window::warp_pointer(&x11, 20, 20).unwrap();
+
+    let press = x::ButtonPressEvent::new(
+        1,
+        10,
+        x11.root(),
+        client,
+        x::WINDOW_NONE,
+        20,
+        20,
+        10,
+        10,
+        x::KeyButMask::from_bits_truncate(x::ModMask::N4.bits()),
+        true,
+    );
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .button_press(&press)
+    .unwrap();
+
+    window::warp_pointer(&x11, 100, 50).unwrap();
+    let stale_motion = |time, root_x, root_y| {
+        x::MotionNotifyEvent::new(
+            x::Motion::Normal,
+            time,
+            x11.root(),
+            client,
+            x::WINDOW_NONE,
+            root_x,
+            root_y,
+            0,
+            0,
+            x::KeyButMask::BUTTON1,
+            true,
+        )
+    };
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .motion_notify(&stale_motion(100, 30, 25))
+    .unwrap();
+    assert_eq!(
+        window::geometry(&x11, client).unwrap().rectangle,
+        Rectangle::new(90, 40, 40, 30),
+    );
+
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .motion_notify(&stale_motion(120, 40, 30))
+    .unwrap();
+    assert_eq!(
+        window::geometry(&x11, client).unwrap().rectangle,
+        Rectangle::new(90, 40, 40, 30),
+        "a second stale event must not replay an old pointer position",
+    );
+
+    let release = x::ButtonReleaseEvent::new(
+        1,
+        130,
+        x11.root(),
+        client,
+        x::WINDOW_NONE,
+        100,
+        50,
+        0,
+        0,
+        x::KeyButMask::empty(),
+        true,
+    );
+    XEventContext {
+        app: &mut app,
+        x11: &x11,
+    }
+    .button_release(&release)
+    .unwrap();
+    x11.send_and_check_request(&x::DestroyWindow { window: client })
+        .unwrap();
 }
 
 #[test]

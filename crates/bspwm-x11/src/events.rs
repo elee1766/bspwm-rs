@@ -155,6 +155,17 @@ impl ConfigureRequestPlan {
         }
     }
 
+    /// Builds the configure request represented by `_NET_RESTACK_WINDOW`.
+    #[must_use]
+    pub fn restack(window: x::Window, sibling: x::Window, mode: x::StackMode) -> Self {
+        let mut values = Vec::with_capacity(2);
+        if !sibling.is_none() {
+            values.push(x::ConfigWindow::Sibling(sibling));
+        }
+        values.push(x::ConfigWindow::StackMode(mode));
+        Self { window, values }
+    }
+
     /// Sends this forwarding plan as a checked `ConfigureWindow` request.
     ///
     /// # Errors
@@ -247,7 +258,11 @@ pub enum EwmhClientMessage {
         source: u32,
     },
     RequestFrameExtents,
-    RestackWindow,
+    RestackWindow {
+        source: u32,
+        sibling: x::Window,
+        mode: x::StackMode,
+    },
 }
 
 /// Decodes the EWMH messages handled in upstream `client_message`.
@@ -299,7 +314,16 @@ pub fn decode_ewmh_client_message(
             source: data[4],
         })
     } else if message_type == atoms.net_restack_window {
-        Some(EwmhClientMessage::RestackWindow)
+        let mode = match data[2] {
+            0 => x::StackMode::Above,
+            1 => x::StackMode::Below,
+            _ => return None,
+        };
+        Some(EwmhClientMessage::RestackWindow {
+            source: data[0],
+            sibling: x::Window::new(data[1]),
+            mode,
+        })
     } else if message_type == atoms.net_request_frame_extents {
         Some(EwmhClientMessage::RequestFrameExtents)
     } else {
@@ -432,6 +456,27 @@ mod tests {
                     x::ConfigWindow::X(-10),
                     x::ConfigWindow::Width(800),
                     x::ConfigWindow::BorderWidth(4),
+                    x::ConfigWindow::Sibling(window(3)),
+                    x::ConfigWindow::StackMode(x::StackMode::Below),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn restack_plan_omits_a_none_sibling_for_absolute_raise() {
+        assert_eq!(
+            ConfigureRequestPlan::restack(window(2), x::Window::none(), x::StackMode::Above),
+            ConfigureRequestPlan {
+                window: window(2),
+                values: vec![x::ConfigWindow::StackMode(x::StackMode::Above)],
+            }
+        );
+        assert_eq!(
+            ConfigureRequestPlan::restack(window(2), window(3), x::StackMode::Below),
+            ConfigureRequestPlan {
+                window: window(2),
+                values: vec![
                     x::ConfigWindow::Sibling(window(3)),
                     x::ConfigWindow::StackMode(x::StackMode::Below),
                 ],

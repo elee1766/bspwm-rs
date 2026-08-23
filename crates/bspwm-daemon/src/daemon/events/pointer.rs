@@ -118,13 +118,6 @@ impl XEventContext<'_> {
             if !self.app.pointer_grab_is_live() {
                 return Ok(());
             }
-            let position = Point::from_x11(event.root_x(), event.root_y());
-            let previous_x = i16::try_from(grab.last_position.x)
-                .expect("pointer grab positions originate from X i16 coordinates");
-            let previous_y = i16::try_from(grab.last_position.y)
-                .expect("pointer grab positions originate from X i16 coordinates");
-            let dx = i32::from(event.root_x().wrapping_sub(previous_x));
-            let dy = i32::from(event.root_y().wrapping_sub(previous_y));
             let client = self.node(grab.node).client.clone();
             let Some(client) = client else {
                 self.app.pointer_grab = None;
@@ -135,9 +128,32 @@ impl XEventContext<'_> {
             {
                 return self.finish_pointer_grab();
             }
+            // Motion events can accumulate while the daemon is stalled. Binding
+            // drags follow the server's current pointer instead of replaying the
+            // stale path after the stall clears.
+            let event_position = Point::from_x11(event.root_x(), event.root_y());
+            let (pointer_window, position) = if matches!(grab.origin, PointerGrabOrigin::Binding) {
+                self.query_pointer()?
+            } else {
+                (x::Window::none(), event_position)
+            };
+            if position == grab.last_position {
+                grab.last_motion_time = event.time();
+                self.app.pointer_grab = Some(grab);
+                return Ok(());
+            }
+            let previous_x = i16::try_from(grab.last_position.x)
+                .expect("pointer grab positions originate from X i16 coordinates");
+            let previous_y = i16::try_from(grab.last_position.y)
+                .expect("pointer grab positions originate from X i16 coordinates");
+            let current_x = i16::try_from(position.x)
+                .expect("pointer grab positions originate from X i16 coordinates");
+            let current_y = i16::try_from(position.y)
+                .expect("pointer grab positions originate from X i16 coordinates");
+            let dx = i32::from(current_x.wrapping_sub(previous_x));
+            let dy = i32::from(current_y.wrapping_sub(previous_y));
             match grab.action {
                 PointerAction::Move if client.state.is_tiled() => {
-                    let (pointer_window, point) = self.query_pointer()?;
                     if pointer_window.resource_id() != self.xid(grab.node) {
                         if let Some((target_monitor, _, target)) =
                             self.app.managed_window(pointer_window.resource_id())
@@ -165,7 +181,7 @@ impl XEventContext<'_> {
                             } else if target_monitor != grab.monitor {
                                 let _ = self.transfer_grabbed_node(&mut grab, target_monitor)?;
                             }
-                        } else if let Some(destination) = self.monitor_at(point) {
+                        } else if let Some(destination) = self.monitor_at(position) {
                             let _ = self.transfer_grabbed_node(&mut grab, destination)?;
                         }
                     }

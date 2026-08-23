@@ -136,7 +136,14 @@ impl DaemonApp {
             })
             .collect();
         for (action, cookie) in actions.into_iter().zip(geometries) {
-            let reply = x11.connection().wait_for_reply(cookie)?;
+            let reply = match x11.connection().wait_for_reply(cookie) {
+                Ok(reply) => reply,
+                Err(xcb::Error::Protocol(xcb::ProtocolError::X(
+                    x::Error::Drawable(_) | x::Error::Window(_),
+                    _,
+                ))) => continue,
+                Err(error) => return Err(error.into()),
+            };
             let actual = Rectangle::from_x11(reply.x(), reply.y(), reply.width(), reply.height());
             crate::ewmh::set_frame_extents(
                 x11,

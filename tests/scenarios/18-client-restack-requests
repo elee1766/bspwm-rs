@@ -1,0 +1,43 @@
+#!/bin/sh
+set -u
+. "$TEST_ROOT/prelude"
+
+first=$(add_controlled_window restack-first restack-first ScenarioRestack)
+second=$(add_controlled_window restack-second restack-second ScenarioRestack)
+$BSPC node "$first" --state floating
+$BSPC node "$second" --state floating
+
+send_window_command restack-first raise
+poll_until 100 0.02 x_window_above "$first" "$second" \
+	|| fail "managed ConfigureRequest did not raise the first client"
+
+"$X_MESSAGE" restack "$second" above
+poll_until 100 0.02 x_window_above "$second" "$first" \
+	|| fail "managed _NET_RESTACK_WINDOW did not raise the second client"
+
+popup_xid_file=$TEST_TMP/restack-popup.xid
+popup_control=$TEST_TMP/restack-popup.control
+popup_events=$TEST_TMP/restack-popup.events
+: > "$popup_control"
+: > "$popup_events"
+"$TEST_WINDOW" restack-popup ScenarioRestack '#E76F51' --override-redirect \
+	--control "$popup_control" --events "$popup_events" \
+	>"$popup_xid_file" 2>>"$TEST_WINDOW_LOG" &
+popup_pid=$!
+printf '%s\n' "$popup_pid" >> "$TEST_WINDOW_PIDS"
+poll_until 100 0.05 file_has_line "$popup_xid_file" \
+	|| fail "unmanaged popup did not print an XID"
+popup=$(sed -n '1p' "$popup_xid_file")
+
+# Lower the popup, then verify it can request an absolute raise through the WM
+# even though it is absent from the managed tree.
+"$X_MESSAGE" restack "$popup" below
+poll_until 100 0.02 x_window_above "$first" "$popup" \
+	|| fail "unmanaged popup _NET_RESTACK_WINDOW was not forwarded downward"
+"$X_MESSAGE" restack "$popup" above
+poll_until 100 0.02 x_window_above "$popup" "$first" \
+	|| fail "unmanaged popup _NET_RESTACK_WINDOW was not forwarded"
+
+send_window_command restack-popup destroy
+close_test_window "$second"
+close_test_window "$first"

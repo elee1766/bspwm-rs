@@ -4,6 +4,7 @@ use bspwm::window::send_client_message;
 use bspwm::x11::X11;
 use xcb::{Xid, XidNew, x};
 
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = std::env::args().skip(1);
     let command = arguments.next().ok_or("missing EWMH command")?;
@@ -86,6 +87,24 @@ fn main() -> Result<(), Box<dyn Error>> {
                     width,
                     height,
                 ],
+            )
+        }
+        "restack" => {
+            let window = parse_window(&required(&mut arguments, "window")?)?;
+            let mode = match required(&mut arguments, "stack mode")?.as_str() {
+                "above" => x::StackMode::Above as u32,
+                "below" => x::StackMode::Below as u32,
+                _ => return Err("stack mode must be above or below".into()),
+            };
+            let sibling = arguments
+                .next()
+                .map(|value| parse_window(&value))
+                .transpose()?
+                .unwrap_or(x::Window::none());
+            (
+                window,
+                x11.atoms().net_restack_window,
+                [2, sibling.resource_id(), mode, 0, 0],
             )
         }
         "request-frame-extents" => {

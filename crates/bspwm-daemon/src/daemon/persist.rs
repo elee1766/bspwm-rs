@@ -99,6 +99,20 @@ impl DaemonApp {
         // `window -> location` entry survives it.
         self.invalidate_window_index();
         self.state.apply_restored(restored);
+        let pending_effects = self.state.pending_effects.len();
+        let missing_clients: Vec<_> = self
+            .all_client_windows()
+            .into_iter()
+            .filter(|window| !window::exists(x11, *window))
+            .map(|window| window.resource_id())
+            .collect();
+        for window_id in missing_clients {
+            log::warn!("dropping vanished restored client 0x{window_id:08X}");
+            let _ = self.forget_window(window_id);
+        }
+        // `forget_window` queues effects for normal runtime removal. Reconstruction
+        // performs its own full arrangement, focus, and EWMH synchronization below.
+        self.state.pending_effects.truncate(pending_effects);
         self.last_user_time = None;
         self.user_time_windows.clear();
         self.sync_request_clients.clear();

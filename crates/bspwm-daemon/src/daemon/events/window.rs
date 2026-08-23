@@ -35,6 +35,32 @@ fn requested_size(event: &x::ConfigureRequestEvent, current: Rectangle) -> (i32,
 }
 
 impl XEventContext<'_> {
+    fn handle_restack_window(
+        &mut self,
+        desktop: crate::world::DesktopId,
+        node: crate::tree::NodeId,
+        mode: x::StackMode,
+    ) -> Result<(), RuntimeError> {
+        let focused = match mode {
+            x::StackMode::Above => true,
+            x::StackMode::Below => false,
+            _ => return Ok(()),
+        };
+        if let Some(client) = self.client_of(node) {
+            let xid = self.xid(node);
+            let level = crate::stack::stack_level(client);
+            let mut backend = crate::daemon::monitors::X11StackBackend::new(self.x11);
+            let result = self
+                .app
+                .state
+                .stacking_order
+                .set_level(&mut backend, xid, level, focused);
+            self.app.complete_stack_operation(backend, result)?;
+        }
+        self.app.sync_stacking_ewmh(self.x11, desktop)?;
+        self.app.update_ewmh(self.x11)
+    }
+
     fn refresh_client_protocols(
         &mut self,
         window: x::Window,
@@ -262,6 +288,9 @@ impl XEventContext<'_> {
                 return Ok(());
             };
             let mask = event.value_mask();
+            if mask.contains(x::ConfigWindowMask::STACK_MODE) {
+                self.handle_restack_window(desktop, node, event.stack_mode())?;
+            }
             if client.state == crate::types::ClientState::Floating {
                 let mut rectangle = client.floating_rectangle;
                 let has_x = mask.contains(x::ConfigWindowMask::X);
@@ -420,7 +449,12 @@ impl XEventContext<'_> {
         }
         let Some((monitor, desktop, node)) = self.app.managed_window(event.window().resource_id())
         else {
-            self.app.postpone_client_message(event);
+            if self.app.postpone_client_message(event) {
+                return Ok(());
+            }
+            if let Some(events::EwmhClientMessage::RestackWindow { sibling, mode, .. }) = message {
+                ConfigureRequestPlan::restack(event.window(), sibling, mode).execute(self.x11)?;
+            }
             return Ok(());
         };
         let Some(message) = message else {
@@ -487,23 +521,8 @@ impl XEventContext<'_> {
                 ..
             } => self
                 .handle_wm_moveresize(monitor, desktop, node, root_x, root_y, direction, button)?,
-            events::EwmhClientMessage::RestackWindow => {
-                let focused = self.world().desktop(desktop).tree.focus == Some(node);
-                if let Some(client) = self.client_of(node)
-                    && crate::stack::stacking_enabled(client, self.app.state.auto_raise)
-                {
-                    let xid = self.xid(node);
-                    let level = crate::stack::stack_level(client);
-                    let mut backend = crate::daemon::monitors::X11StackBackend::new(self.x11);
-                    let result = self
-                        .app
-                        .state
-                        .stacking_order
-                        .set_level(&mut backend, xid, level, focused);
-                    self.app.complete_stack_operation(backend, result)?;
-                }
-                self.app.sync_stacking_ewmh(self.x11, desktop)?;
-                self.app.update_ewmh(self.x11)?;
+            events::EwmhClientMessage::RestackWindow { mode, .. } => {
+                self.handle_restack_window(desktop, node, mode)?;
             }
             events::EwmhClientMessage::CurrentDesktop { .. }
             | events::EwmhClientMessage::RequestFrameExtents => unreachable!(),
