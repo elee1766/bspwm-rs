@@ -588,6 +588,12 @@ impl World {
         } else {
             self.desktop(destination).tree
         };
+        if destination_state
+            .focus
+            .is_some_and(|focus| !tree.contains(&destination_state, focus))
+        {
+            destination_state.focus = None;
+        }
         let branch = anchor.and_then(|anchor| self.branch_for(&mut tree, anchor, split_ratio));
         tree.insert(
             &mut destination_state,

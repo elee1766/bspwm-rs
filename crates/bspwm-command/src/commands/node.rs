@@ -863,9 +863,12 @@ impl CommandHandler<'_> {
                         else {
                             return Ok(());
                         };
-                        location.node = location
-                            .desktop
-                            .and_then(|desktop| self.state.world.desktop(desktop).tree.focus);
+                        location.node = location.desktop.and_then(|desktop| {
+                            let state = self.state.world.desktop(desktop).tree;
+                            state
+                                .focus
+                                .filter(|focus| self.state.world.tree.contains(&state, *focus))
+                        });
                         location
                     } else {
                         let Some(location) = Self::selector_failure(

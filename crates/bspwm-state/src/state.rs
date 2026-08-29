@@ -227,7 +227,7 @@ impl DaemonState {
         self.clients_count = restored.clients_count;
     }
 
-    /// Drops history and stacking references to nodes the arena has freed.
+    /// Drops references to nodes the arena has freed.
     ///
     /// Structural tree operations free nodes their caller never named: `unlink`
     /// collapses the parent branch, `insert` consumes a bare receptacle. Since
@@ -241,6 +241,13 @@ impl DaemonState {
         }
         let retired = self.world.tree.take_retired_nodes();
         self.history.forget_nodes(&retired);
+        let desktops: Vec<_> = self.world.desktops().map(|(_, desktop)| desktop).collect();
+        for desktop in desktops {
+            let state = self.world.desktop(desktop).tree;
+            if state.focus.is_some_and(|focus| retired.contains(&focus)) {
+                self.world.desktop_mut(desktop).tree.focus = None;
+            }
+        }
         // StackMirror stores XIDs, not NodeIds. Client windows are removed from
         // the mirror at their specific removal sites (forget_window,
         // remove_subtree equivalents). Retired nodes here are branches and
@@ -469,5 +476,26 @@ mod tests {
             state.validate(),
             Err("history recording flag differs from record_history")
         );
+    }
+
+    #[test]
+    fn retired_desktop_focus_is_repaired_during_sweep() {
+        let mut state = DaemonState::default();
+        let monitor =
+            state
+                .world
+                .create_monitor(1, None, Rectangle::new(0, 0, 1920, 1080), &state.settings);
+        let desktop = state.world.create_desktop(2, None, &state.settings);
+        assert!(state.world.add_desktop(monitor, desktop));
+        let root = state.world.tree.add_node(3, state.settings.split_ratio);
+        state.world.desktop_mut(desktop).tree.root = Some(root);
+        let retired = state.world.tree.add_node(4, state.settings.split_ratio);
+        state.world.tree.destroy_subtree(retired);
+        state.world.desktop_mut(desktop).tree.focus = Some(retired);
+
+        state.forget_retired_nodes();
+
+        assert_eq!(state.world.desktop(desktop).tree.focus, None);
+        assert_eq!(state.validate(), Ok(()));
     }
 }

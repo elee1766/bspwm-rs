@@ -264,6 +264,7 @@ fn desktop_dto(world: &World, desktop: DesktopId) -> DesktopDto<'_> {
         focused_node_id: desktop
             .tree
             .focus
+            .filter(|focus| world.tree.contains(&desktop.tree, *focus))
             .map_or(0, |node| world.tree.node(node).external_id),
         padding: desktop.padding,
         root: desktop.tree.root.map(|node| node_dto(world, node)),
@@ -699,6 +700,17 @@ mod tests {
         assert!(state.get("focusedMonitorId").is_none());
         assert!(state.get("eventSubscribers").is_none());
         assert!(monitor.get("focusedDesktopId").is_none());
+    }
+
+    #[test]
+    fn retired_desktop_focus_serializes_as_unfocused() {
+        let (mut world, _, desktop, _, _, _) = world_with_tree();
+        let retired = world.tree.add_node(0x103, 0.5);
+        world.tree.destroy_subtree(retired);
+        world.desktop_mut(desktop).tree.focus = Some(retired);
+
+        let value: Value = serde_json::from_str(&query_desktop(&world, desktop)).unwrap();
+        assert_eq!(value["focusedNodeId"], 0);
     }
 
     #[test]

@@ -1012,6 +1012,27 @@ fn pure_command_families_mutate_valid_state_and_expose_x_effects() {
 }
 
 #[test]
+fn transfer_to_empty_desktop_ignores_a_stale_foreign_focus() {
+    let mut state = descriptor_fixture();
+    let node = find_by_id(&state.world, 0x31).unwrap().node.unwrap();
+    let foreign = find_by_id(&state.world, 0x50).unwrap().node.unwrap();
+    let empty = state
+        .world
+        .monitor_order()
+        .iter()
+        .flat_map(|monitor| state.world.monitor(*monitor).desktops.iter())
+        .copied()
+        .find(|desktop| state.world.desktop(*desktop).name == "empty")
+        .unwrap();
+    state.world.desktop_mut(empty).tree.focus = Some(foreign);
+
+    assert!(run(&mut state, &[b"node", b"0x31", b"-d", b"empty"]).is_empty());
+    assert_eq!(state.world.node_desktop(node), Some(empty));
+    assert_eq!(state.world.desktop(empty).tree.focus, Some(node));
+    assert_eq!(state.validate(), Ok(()));
+}
+
+#[test]
 fn node_follow_transfer_adapts_geometry_focuses_destination_and_records_effects() {
     let mut state = descriptor_fixture();
     let node = find_by_id(&state.world, 0x31).unwrap().node.unwrap();

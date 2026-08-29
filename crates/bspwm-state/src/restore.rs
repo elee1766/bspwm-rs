@@ -257,23 +257,7 @@ fn restore_desktop(
     let focus = if dto.focused_node_id == 0 {
         None
     } else {
-        let root_id = root.ok_or_else(|| {
-            RestoreError::new(
-                format!("{path}.focusedNodeId"),
-                "nonzero focus id with a null root",
-            )
-        })?;
-        Some(
-            world
-                .tree
-                .find_by_external_id(root_id, dto.focused_node_id)
-                .ok_or_else(|| {
-                    RestoreError::new(
-                        format!("{path}.focusedNodeId"),
-                        format!("node id {} is not in this desktop", dto.focused_node_id),
-                    )
-                })?,
-        )
+        root.and_then(|root_id| world.tree.find_by_external_id(root_id, dto.focused_node_id))
     };
     let layout = expect_enum!(parse_layout, dto.layout, path, "layout", "layout")?;
     let user_layout = expect_enum!(parse_layout, dto.user_layout, path, "userLayout", "layout")?;
@@ -790,6 +774,21 @@ mod tests {
         let desktop = restored.world.monitor_order()[0];
         let desktop = restored.world.monitor(desktop).desktops[0];
         assert_eq!(restored.world.desktop(desktop).tree.root, None);
+    }
+
+    #[test]
+    fn stale_focus_on_an_empty_desktop_is_cleared() {
+        let mut value: Value = serde_json::from_str(&query_state(&represented_state())).unwrap();
+        let desktop = value["monitors"][0]["desktops"][0].as_object_mut().unwrap();
+        desktop.remove("root");
+        desktop["focusedNodeId"] = serde_json::json!(0x02C0_0004);
+        value["clientsCount"] = serde_json::json!(0);
+
+        let restored = restore_state(&value.to_string(), &Settings::default()).unwrap();
+        let monitor = restored.world.monitor_order()[0];
+        let desktop = restored.world.monitor(monitor).desktops[0];
+        assert_eq!(restored.world.desktop(desktop).tree.root, None);
+        assert_eq!(restored.world.desktop(desktop).tree.focus, None);
     }
 
     #[test]
