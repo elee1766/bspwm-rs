@@ -460,6 +460,7 @@ impl DaemonApp {
                 }
             }
         }
+        self.state.sanitize_history();
         if synced_ewmh {
             self.update_ewmh(x11)?;
         }

@@ -121,6 +121,14 @@ impl<M: Copy + Eq, D: Copy + Eq> History<M, D> {
         self.remove_adjacent_duplicates();
     }
 
+    pub fn retain_locations<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(Coordinates<M, D>) -> bool,
+    {
+        self.retain_with_needle(|entry| keep(entry.location));
+        self.remove_adjacent_duplicates();
+    }
+
     pub fn remove_node(&mut self, tree: &Tree, node: NodeId, deep: bool) {
         self.retain_with_needle(|entry| {
             entry.location.node.is_none_or(|candidate| {

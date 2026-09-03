@@ -307,6 +307,7 @@ impl CommandHandler<'_> {
         activate: bool,
         policy: FocusPolicy,
     ) -> bool {
+        self.state.sanitize_history();
         let (Some(monitor), Some(desktop)) = (target.monitor, target.desktop) else {
             return false;
         };
@@ -315,6 +316,7 @@ impl CommandHandler<'_> {
             let state = self.state.world.desktop(desktop).tree;
             state
                 .focus
+                .filter(|node| self.state.world.tree.contains(&state, *node))
                 .or_else(|| {
                     self.state
                         .history

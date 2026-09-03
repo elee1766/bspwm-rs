@@ -254,6 +254,19 @@ impl DaemonState {
         // receptacles that were never in the stacking mirror.
     }
 
+    /// Drops history entries whose coordinates no longer describe the world.
+    pub fn sanitize_history(&mut self) {
+        let world = &self.world;
+        self.history.retain_locations(|location| {
+            world.desktop_monitor(location.desktop) == Some(location.monitor)
+                && location.node.is_none_or(|node| {
+                    world
+                        .tree
+                        .contains(&world.desktop(location.desktop).tree, node)
+                })
+        });
+    }
+
     /// Checks invariants spanning the independently implemented state stores.
     #[allow(clippy::missing_errors_doc)]
     pub fn validate(&self) -> Result<(), &'static str> {
@@ -496,6 +509,38 @@ mod tests {
         state.forget_retired_nodes();
 
         assert_eq!(state.world.desktop(desktop).tree.focus, None);
+        assert_eq!(state.validate(), Ok(()));
+    }
+
+    #[test]
+    fn invalid_history_coordinates_are_removed() {
+        let mut state = DaemonState::default();
+        let monitor =
+            state
+                .world
+                .create_monitor(1, None, Rectangle::new(0, 0, 1920, 1080), &state.settings);
+        let first = state.world.create_desktop(2, None, &state.settings);
+        let second = state.world.create_desktop(3, None, &state.settings);
+        assert!(state.world.add_desktop(monitor, first));
+        assert!(state.world.add_desktop(monitor, second));
+        let node = state.world.tree.add_node(4, state.settings.split_ratio);
+        state.world.desktop_mut(second).tree.root = Some(node);
+        state.history.add(
+            crate::history::Coordinates {
+                monitor,
+                desktop: first,
+                node: Some(node),
+            },
+            true,
+        );
+        assert_eq!(
+            state.validate(),
+            Err("history node does not belong to its desktop")
+        );
+
+        state.sanitize_history();
+
+        assert!(state.history.entries().is_empty());
         assert_eq!(state.validate(), Ok(()));
     }
 }

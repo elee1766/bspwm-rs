@@ -110,6 +110,7 @@ impl DaemonApp {
             log::warn!("dropping vanished restored client 0x{window_id:08X}");
             let _ = self.forget_window(window_id);
         }
+        self.state.sanitize_history();
         // `forget_window` queues effects for normal runtime removal. Reconstruction
         // performs its own full arrangement, focus, and EWMH synchronization below.
         self.state.pending_effects.truncate(pending_effects);

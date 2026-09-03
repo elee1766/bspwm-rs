@@ -1033,6 +1033,39 @@ fn transfer_to_empty_desktop_ignores_a_stale_foreign_focus() {
 }
 
 #[test]
+fn focusing_empty_desktop_discards_foreign_history_node() {
+    let mut state = descriptor_fixture();
+    let foreign = find_by_id(&state.world, 0x50).unwrap().node.unwrap();
+    let empty = state
+        .world
+        .monitor_order()
+        .iter()
+        .flat_map(|monitor| state.world.monitor(*monitor).desktops.iter())
+        .copied()
+        .find(|desktop| state.world.desktop(*desktop).name == "empty")
+        .unwrap();
+    let monitor = state.world.desktop_monitor(empty).unwrap();
+    state.world.desktop_mut(empty).tree.focus = Some(foreign);
+    state.history.add(
+        crate::history::Coordinates {
+            monitor,
+            desktop: empty,
+            node: Some(foreign),
+        },
+        true,
+    );
+
+    assert!(run(&mut state, &[b"desktop", b"empty", b"--focus"]).is_empty());
+    assert_eq!(state.world.desktop(empty).tree.focus, None);
+    assert!(
+        state.history.entries().iter().all(|entry| {
+            entry.location.desktop != empty || entry.location.node != Some(foreign)
+        })
+    );
+    assert_eq!(state.validate(), Ok(()));
+}
+
+#[test]
 fn node_follow_transfer_adapts_geometry_focuses_destination_and_records_effects() {
     let mut state = descriptor_fixture();
     let node = find_by_id(&state.world, 0x31).unwrap().node.unwrap();
