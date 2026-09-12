@@ -323,7 +323,7 @@ impl DaemonApp {
             .collect::<io::Result<Vec<_>>>()?;
         state["eventSubscribers"] = serde_json::Value::Array(subscribers);
         let bytes = serde_json::to_vec(&state).map_err(io::Error::other)?;
-        std::fs::write(path, bytes)?;
+        bspwm_ipc::write_private_file(path, &bytes)?;
         Ok(descriptors)
     }
 

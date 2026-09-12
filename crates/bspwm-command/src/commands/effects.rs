@@ -43,6 +43,22 @@ impl CommandHandler<'_> {
         });
     }
 
+    /// Announces a newly created desktop to `desktop_add` subscribers.
+    pub(super) fn broadcast_desktop_add(
+        &mut self,
+        monitor: crate::world::MonitorId,
+        desktop: crate::world::DesktopId,
+    ) {
+        let monitor_external = self.state.world.monitor(monitor).external_id;
+        let desktop_external = self.state.world.desktop(desktop).external_id;
+        let name = self.state.world.desktop(desktop).name.clone();
+        self.broadcast(
+            crate::types::SubscriberMask::DESKTOP_ADD,
+            format!("desktop_add 0x{monitor_external:08X} 0x{desktop_external:08X} {name}\n"),
+        );
+        self.report_effect();
+    }
+
     pub(super) fn report_effect(&mut self) {
         self.state.pending_effects.push(CommandEffect::Broadcast {
             mask: crate::types::SubscriberMask::REPORT,

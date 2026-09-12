@@ -27,6 +27,11 @@ fn main() {
     ) {
         Ok(false) => {}
         Ok(true) => std::process::exit(FAILURE),
+        // A rejected message is a usage error, not a transport failure.
+        Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+            eprintln!("{error}");
+            std::process::exit(FAILURE);
+        }
         Err(_) => {
             eprintln!("Failed to connect to the socket.");
             std::process::exit(FAILURE);

@@ -117,6 +117,7 @@ impl CommandHandler<'_> {
                             &self.state.settings,
                         );
                         self.state.world.add_desktop(monitor, desktop);
+                        self.broadcast_desktop_add(monitor, desktop);
                     }
                     self.state.pending_effects.push(CommandEffect::SyncEwmh);
                     break;
@@ -145,6 +146,7 @@ impl CommandHandler<'_> {
                                 &self.state.settings,
                             );
                             self.state.world.add_desktop(monitor, desktop);
+                            self.broadcast_desktop_add(monitor, desktop);
                         }
                     } else if names.len() < existing.len() {
                         for desktop in existing[names.len()..].iter().rev().copied() {

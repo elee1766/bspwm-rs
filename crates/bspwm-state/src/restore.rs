@@ -312,7 +312,9 @@ fn restore_node(
     )?;
     let client = dto
         .client
-        .map(|client| restore_client(client, settings, &format!("{path}.client")))
+        .map(|client| {
+            restore_client(client, settings, external_id, &format!("{path}.client"))
+        })
         .transpose()?;
     let presel = dto
         .presel
@@ -354,6 +356,7 @@ fn restore_presel(dto: &PreselDto<'_>, path: &str) -> Result<Presel, RestoreErro
 fn restore_client(
     dto: ClientDto<'_>,
     settings: &Settings,
+    external_id: u32,
     path: &str,
 ) -> Result<Client, RestoreError> {
     let mut client = Client::from_settings(settings);
@@ -380,7 +383,11 @@ fn restore_client(
     client.shown = dto.shown;
     client.tiled_rectangle = dto.tiled_rectangle;
     client.floating_rectangle = dto.floating_rectangle;
-    client.transient_for = dto.transient_for.filter(|id| *id != 0);
+    // A window transient for itself is not a valid relationship and would
+    // otherwise be handed to the stacking mirror as an unsatisfiable constraint.
+    client.transient_for = dto
+        .transient_for
+        .filter(|id| *id != 0 && *id != external_id);
     Ok(client)
 }
 

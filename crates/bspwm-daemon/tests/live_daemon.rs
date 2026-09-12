@@ -861,9 +861,14 @@ fn live_schedule_applies_class_type_and_user_rules() {
     assert_eq!(client.layer, StackLayer::Above);
     assert_eq!(client.border_width, 0);
     assert_eq!(app.state.rules.len(), 1);
+    // The dialog is also the focused node, so _NET_WM_STATE_FOCUSED accompanies
+    // the ABOVE state that `put_dialogs_above` produces.
     assert_eq!(
         window::get_property::<u32>(&x11, dialog, x11.atoms().net_wm_state, x::ATOM_ATOM).unwrap(),
-        [x11.atoms().net_wm_state_above.resource_id()]
+        [
+            x11.atoms().net_wm_state_above.resource_id(),
+            x11.atoms().net_wm_state_focused.resource_id()
+        ]
     );
 
     let tool: x::Window = x11.connection().generate_id();
@@ -1303,8 +1308,19 @@ fn live_sync_resize_coalesces_acknowledgements_and_times_out_safely() {
         },
     })
     .unwrap();
-    std::thread::sleep(Duration::from_millis(12));
-    assert!(RuntimeApp::poll(&mut app, &x11).unwrap());
+    // The counter change is delivered as a Sync AlarmNotify event, which the
+    // runtime dispatches through `handle_event`; `poll` only covers timeouts.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while window::geometry(&x11, client).unwrap().rectangle != Rectangle::new(0, 0, 60, 50) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the acknowledgement never released the pending rectangle",
+        );
+        while let Some(event) = x11.poll_for_event().unwrap() {
+            RuntimeApp::handle_event(&mut app, Ok(event), &x11).unwrap();
+        }
+        RuntimeApp::poll(&mut app, &x11).unwrap();
+    }
     assert_eq!(
         window::geometry(&x11, client).unwrap().rectangle,
         Rectangle::new(0, 0, 60, 50),
@@ -1333,8 +1349,16 @@ fn live_sync_resize_coalesces_acknowledgements_and_times_out_safely() {
         },
     })
     .unwrap();
-    std::thread::sleep(Duration::from_millis(12));
-    assert!(RuntimeApp::poll(&mut app, &x11).unwrap());
+    // Drain the AlarmNotify for the coalesced acknowledgement so the grab
+    // returns to idle before the next motion starts a fresh request. Readiness
+    // is proven below: a settled grab applies the next motion immediately.
+    for _ in 0..100 {
+        while let Some(event) = x11.poll_for_event().unwrap() {
+            RuntimeApp::handle_event(&mut app, Ok(event), &x11).unwrap();
+        }
+        RuntimeApp::poll(&mut app, &x11).unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+    }
 
     XEventContext {
         app: &mut app,

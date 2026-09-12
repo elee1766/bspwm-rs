@@ -105,6 +105,21 @@ impl CommandHandler<'_> {
                         &self.state.settings,
                     );
                     self.state.world.add_desktop(monitor, desktop);
+                    self.broadcast(
+                        crate::types::SubscriberMask::MONITOR_ADD,
+                        format!(
+                            "monitor_add 0x{monitor_external_id:08X} {name} {}x{}+{}+{}\n",
+                            rectangle.width, rectangle.height, rectangle.x, rectangle.y,
+                        ),
+                    );
+                    let desktop_name = self.state.world.desktop(desktop).name.clone();
+                    self.broadcast(
+                        crate::types::SubscriberMask::DESKTOP_ADD,
+                        format!(
+                            "desktop_add 0x{monitor_external_id:08X} 0x{desktop_external_id:08X} {desktop_name}\n"
+                        ),
+                    );
+                    self.report_effect();
                     self.state.pending_effects.extend([
                         CommandEffect::CreateMonitorRoot { monitor },
                         CommandEffect::SyncEwmh,

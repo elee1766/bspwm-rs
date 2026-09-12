@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -30,9 +30,7 @@ pub struct Display {
 pub fn parse_display(value: &str) -> Option<Display> {
     let value = value.rsplit_once('/').map_or(value, |(_, display)| display);
     let (host, numbers) = value.rsplit_once(':')?;
-    let (display, screen) = numbers
-        .split_once('.')
-        .map_or((numbers, "0"), |parts| parts);
+    let (display, screen) = numbers.split_once('.').unwrap_or((numbers, "0"));
     Some(Display {
         host: host.into(),
         display: display.parse().ok()?,
@@ -292,6 +290,14 @@ impl Write for UnixResponse {
 
 /// Reads one NUL-terminated request without allowing it to exceed `limit` bytes.
 ///
+/// A read that ends in NUL completes the request. This keeps a client that sends
+/// its message without closing the write side, which `bspc` does not do but a
+/// third-party client may, from stalling the single-threaded daemon until the
+/// read timeout expires. The cost is that a client splitting one message across
+/// several writes can have the prefix executed as a complete command; framing on
+/// EOF instead would freeze the whole window manager for the timeout on every
+/// connection that stays open, which is the worse failure.
+///
 /// # Errors
 /// Returns an error if reading fails or the request exceeds `limit`.
 pub fn receive_request(reader: &mut impl Read, limit: usize) -> io::Result<Vec<u8>> {
@@ -319,6 +325,36 @@ pub fn receive_request(reader: &mut impl Read, limit: usize) -> io::Result<Vec<u
     }
 }
 
+/// Writes `contents` to `path`, refusing to follow a symlink or reuse a file
+/// created by anyone else.
+///
+/// The state file lives at a predictable path in a world-writable directory, so
+/// a plain write would let any local user pre-create that path and redirect the
+/// dump into a file of their choosing, or keep a readable handle on state the
+/// daemon is about to write. Removing any existing entry first drops a planted
+/// symlink without touching its target, and `O_EXCL` then guarantees the
+/// descriptor belongs to a file this process just created with private
+/// permissions. If the path is recreated in between, the exclusive create fails
+/// and nothing is written.
+///
+/// # Errors
+/// Returns an error if the file cannot be created exclusively or written.
+pub fn write_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
+        .open(path)?;
+    file.write_all(contents)?;
+    file.flush()
+}
+
 /// Clears `FD_CLOEXEC` so an owned descriptor can cross a process restart.
 ///
 /// # Errors
@@ -332,7 +368,7 @@ pub fn set_inheritable(fd: &impl AsFd) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -400,6 +436,30 @@ mod tests {
     fn rejects_fifo_templates_without_six_trailing_placeholders() {
         let error = create_fifo_in(Path::new("/tmp"), "bspwm_fifo").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn private_write_replaces_a_planted_symlink_without_touching_its_target() {
+        let directory = test_path("private-write");
+        fs::create_dir(&directory).unwrap();
+        let victim = directory.join("victim");
+        let state = directory.join("state");
+        fs::write(&victim, b"precious").unwrap();
+        std::os::unix::fs::symlink(&victim, &state).unwrap();
+
+        write_private_file(&state, b"dump").unwrap();
+
+        assert_eq!(fs::read(&victim).unwrap(), b"precious", "target was written");
+        assert_eq!(fs::read(&state).unwrap(), b"dump");
+        let metadata = fs::symlink_metadata(&state).unwrap();
+        assert!(metadata.file_type().is_file(), "symlink survived");
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+
+        // Overwriting an ordinary file this process owns still works.
+        write_private_file(&state, b"second").unwrap();
+        assert_eq!(fs::read(&state).unwrap(), b"second");
+
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

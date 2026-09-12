@@ -14,22 +14,23 @@ pub struct Response {
     pub failed: bool,
 }
 
+/// Encodes arguments as the NUL-separated, NUL-terminated wire message.
+///
+/// Returns `None` when the arguments do not fit in [`BUFFER_SIZE`]. Truncating
+/// instead would silently drop trailing arguments, turning a too-long command
+/// into a different, still-valid one: `monitor --rename <long> --focus` would
+/// lose `--focus` and be executed without it.
 #[must_use]
-pub fn make_message<'a>(args: impl IntoIterator<Item = &'a str>) -> Vec<u8> {
+pub fn make_message<'a>(args: impl IntoIterator<Item = &'a str>) -> Option<Vec<u8>> {
     let mut message = Vec::with_capacity(BUFFER_SIZE);
     for argument in args {
-        let remaining = BUFFER_SIZE.saturating_sub(message.len());
-        if remaining == 0 {
-            break;
-        }
-        let bytes = argument.as_bytes();
-        let copy_length = bytes.len().min(remaining.saturating_sub(1));
-        message.extend_from_slice(&bytes[..copy_length]);
-        if message.len() < BUFFER_SIZE {
-            message.push(0);
+        message.extend_from_slice(argument.as_bytes());
+        message.push(0);
+        if message.len() > BUFFER_SIZE {
+            return None;
         }
     }
-    message
+    Some(message)
 }
 
 #[allow(clippy::missing_errors_doc)]
@@ -52,7 +53,12 @@ pub fn send_message_stream(
     stderr: &mut impl Write,
 ) -> io::Result<bool> {
     let mut stream = UnixStream::connect(path)?;
-    let message = make_message(args.iter().map(String::as_str));
+    let message = make_message(args.iter().map(String::as_str)).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("message exceeds the {BUFFER_SIZE}-byte limit"),
+        )
+    })?;
     stream.write_all(&message)?;
     stream.shutdown(std::net::Shutdown::Write)?;
     stream_response(&mut stream, stdout, stderr)
@@ -70,6 +76,14 @@ pub fn read_response(reader: &mut impl Read) -> io::Result<Response> {
     })
 }
 
+/// Streams a daemon response, splitting it into stdout and stderr.
+///
+/// Failure is signalled in band by [`FAILURE_MESSAGE`], which the daemon writes
+/// immediately before the diagnostic. The marker is located wherever it falls
+/// rather than only at the head of a read: a successful command's output and a
+/// later command's error can arrive in one chunk, and the daemon may flush the
+/// marker and its message separately. Everything after the first marker belongs
+/// to stderr, which matches the daemon writing it last before closing.
 #[allow(clippy::missing_errors_doc)]
 pub fn stream_response(
     reader: &mut impl Read,
@@ -83,17 +97,35 @@ pub fn stream_response(
         if count == 0 {
             return Ok(failed);
         }
-        let chunk = &buffer[..count];
-        if chunk[0] == FAILURE_MESSAGE {
-            failed = true;
-            stderr.write_all(&chunk[1..])?;
-            stderr.flush()?;
-        } else if let Err(error) = stdout.write_all(chunk).and_then(|()| stdout.flush()) {
-            if error.kind() == io::ErrorKind::BrokenPipe {
+        let mut chunk = &buffer[..count];
+        if !failed
+            && let Some(marker) = chunk.iter().position(|byte| *byte == FAILURE_MESSAGE)
+        {
+            let (before, after) = chunk.split_at(marker);
+            if !before.is_empty() && write_or_stop(stdout, before)? {
                 return Ok(failed);
             }
-            return Err(error);
+            failed = true;
+            chunk = &after[1..];
         }
+        if chunk.is_empty() {
+            continue;
+        }
+        if failed {
+            stderr.write_all(chunk)?;
+            stderr.flush()?;
+        } else if write_or_stop(stdout, chunk)? {
+            return Ok(failed);
+        }
+    }
+}
+
+/// Writes to stdout, reporting whether a closed pipe should end the stream.
+fn write_or_stop(stdout: &mut impl Write, bytes: &[u8]) -> io::Result<bool> {
+    match stdout.write_all(bytes).and_then(|()| stdout.flush()) {
+        Ok(()) => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(true),
+        Err(error) => Err(error),
     }
 }
 
@@ -183,17 +215,20 @@ mod tests {
 
     #[test]
     fn message_is_nul_separated_and_terminated() {
-        assert_eq!(make_message(["query", "-M"]), b"query\0-M\0");
+        assert_eq!(make_message(["query", "-M"]).unwrap(), b"query\0-M\0");
+        // An over-long message is rejected rather than silently losing arguments.
+        let long = "x".repeat(BUFFER_SIZE);
+        assert_eq!(make_message(["monitor", long.as_str(), "--focus"]), None);
     }
 
     #[test]
     fn response_routes_failure_chunks_to_stderr() {
         let cases = [
             (
-                "success chunk",
-                &b"ok\n\x07bad\n"[..],
+                "clean success",
+                &b"ok\n"[..],
                 Response {
-                    stdout: b"ok\n\x07bad\n".to_vec(),
+                    stdout: b"ok\n".to_vec(),
                     stderr: Vec::new(),
                     failed: false,
                 },
@@ -207,9 +242,55 @@ mod tests {
                     failed: true,
                 },
             ),
+            (
+                // One request can carry several commands: earlier output
+                // succeeds and a later command fails, sharing a read.
+                "output followed by a failure",
+                &b"ok\n\x07bad\n"[..],
+                Response {
+                    stdout: b"ok\n".to_vec(),
+                    stderr: b"bad\n".to_vec(),
+                    failed: true,
+                },
+            ),
         ];
         for (label, mut input, expected) in cases {
             assert_eq!(read_response(&mut input).unwrap(), expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn failure_marker_split_across_reads_is_still_detected() {
+        let mut input = Chunks::new(&[b"\x07", b"Invalid argument.\n"]);
+        assert_eq!(
+            read_response(&mut input).unwrap(),
+            Response {
+                stdout: Vec::new(),
+                stderr: b"Invalid argument.\n".to_vec(),
+                failed: true,
+            }
+        );
+    }
+
+    struct Chunks {
+        chunks: std::collections::VecDeque<Vec<u8>>,
+    }
+
+    impl Chunks {
+        fn new(chunks: &[&[u8]]) -> Self {
+            Self {
+                chunks: chunks.iter().map(|chunk| chunk.to_vec()).collect(),
+            }
+        }
+    }
+
+    impl Read for Chunks {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let Some(chunk) = self.chunks.pop_front() else {
+                return Ok(0);
+            };
+            buffer[..chunk.len()].copy_from_slice(&chunk);
+            Ok(chunk.len())
         }
     }
 

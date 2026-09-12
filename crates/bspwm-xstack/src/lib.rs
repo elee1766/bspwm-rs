@@ -192,17 +192,42 @@ impl StackMirror {
 
     /// Register a transient-for relationship. The child will be
     /// automatically kept above the parent after every stacking operation.
+    ///
+    /// A window cannot be transient for itself, and a relationship that would
+    /// close a cycle is rejected. Both are ignored rather than reported: the
+    /// callers are X property handlers and state restoration, which cannot act
+    /// on the error, and an unsatisfiable ordering constraint has no valid
+    /// stacking to apply.
     pub fn set_transient<B: StackBackend>(
         &mut self,
         backend: &mut B,
         child: u32,
         parent: u32,
     ) -> Result<(), B::Error> {
+        if child == parent || self.would_cycle(child, parent) {
+            return Ok(());
+        }
         self.transaction(backend, |candidate, _| {
             candidate.transients.retain(|&(c, _)| c != child);
             candidate.transients.push((child, parent));
             Ok(())
         })
+    }
+
+    /// Reports whether making `child` transient for `parent` would close a cycle,
+    /// i.e. whether `child` is already an ancestor of `parent`.
+    fn would_cycle(&self, child: u32, parent: u32) -> bool {
+        let mut current = parent;
+        for _ in 0..self.transients.len() {
+            if current == child {
+                return true;
+            }
+            let Some(next) = self.transient_parent(current) else {
+                return false;
+            };
+            current = next;
+        }
+        current == child
     }
 
     /// Remove a transient-for relationship for `child`.
@@ -332,7 +357,14 @@ impl StackMirror {
                     continue;
                 }
                 let entry = self.order.remove(child_pos);
-                let parent_pos = self.position(parent).expect("parent was present");
+                // The parent was present a moment ago, but removing the child
+                // shifts positions. A missing parent here would mean an
+                // unsatisfiable constraint, so restore the child and move on
+                // rather than ending the session.
+                let Some(parent_pos) = self.position(parent) else {
+                    self.order.insert(child_pos, entry);
+                    continue;
+                };
                 self.order.insert(parent_pos + 1, entry);
                 moved = true;
             }
@@ -413,7 +445,10 @@ impl StackMirror {
             return Ok(());
         }
         let entry = self.order.remove(child_pos);
-        let parent_pos = self.position(parent).expect("parent was present");
+        let Some(parent_pos) = self.position(parent) else {
+            self.order.insert(child_pos, entry);
+            return Ok(());
+        };
         self.order.insert(parent_pos + 1, entry);
         backend.stack_above(child, parent)
     }
@@ -1171,6 +1206,41 @@ mod tests {
         // Transient should be gone (parent no longer exists).
         // Lowering child should work without panics.
         mirror.lower_in_level(&mut &backend, 200).unwrap();
+    }
+
+    #[test]
+    fn self_transient_is_rejected_without_panicking() {
+        let backend = RecordBackend::default();
+        let mut mirror = StackMirror::new();
+        mirror.insert(&mut &backend, 1, 1).unwrap();
+        mirror.insert(&mut &backend, 2, 1).unwrap();
+
+        mirror.set_transient(&mut &backend, 1, 1).unwrap();
+
+        assert!(mirror.transients.is_empty(), "self-transient was recorded");
+        // Operations that run transient enforcement must stay healthy.
+        mirror.raise_in_level(&mut &backend, 2).unwrap();
+        mirror.raise_in_level(&mut &backend, 1).unwrap();
+        assert_eq!(mirror.windows(), [2, 1]);
+    }
+
+    #[test]
+    fn cyclic_transient_is_rejected() {
+        let backend = RecordBackend::default();
+        let mut mirror = StackMirror::new();
+        mirror.insert(&mut &backend, 1, 1).unwrap();
+        mirror.insert(&mut &backend, 2, 1).unwrap();
+        mirror.insert(&mut &backend, 3, 1).unwrap();
+
+        mirror.set_transient(&mut &backend, 1, 2).unwrap();
+        mirror.set_transient(&mut &backend, 2, 3).unwrap();
+        // 3 -> 1 would close the cycle 1 -> 2 -> 3 -> 1.
+        mirror.set_transient(&mut &backend, 3, 1).unwrap();
+
+        assert_eq!(mirror.transients, [(1, 2), (2, 3)]);
+        // The surviving chain still orders parents below children.
+        mirror.raise_in_level(&mut &backend, 3).unwrap();
+        assert_eq!(mirror.windows(), [3, 2, 1]);
     }
 
     #[test]
