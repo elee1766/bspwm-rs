@@ -409,7 +409,7 @@ impl DaemonApp {
         });
     }
 
-    fn poll_pending_fifo_subscriptions(&mut self) {
+    pub(super) fn poll_pending_fifo_subscriptions(&mut self) {
         if self.pending_fifo_subscriptions.is_empty() {
             return;
         }
@@ -582,7 +582,9 @@ mod tests {
             early.unwrap_or_else(|_| completion.recv_timeout(Duration::from_secs(1)).unwrap());
         server.join().unwrap();
         assert!(returned_before_reader, "FIFO open blocked the event loop");
-        app.prune_dead_subscribers();
+        // Once the reader is present, even a broadcast before the next idle
+        // sweep must activate the subscription and send its initial report.
+        app.broadcast_status(SubscriberMask::NODE_ADD, b"node_add ignored\n");
 
         let report = b"WMmonitor:FI:LT\n";
         let mut bytes = vec![0; report.len()];

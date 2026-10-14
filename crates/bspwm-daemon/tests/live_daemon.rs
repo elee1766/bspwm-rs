@@ -481,6 +481,8 @@ fn live_presel_feedback_command_cancel_and_insertion_lifecycle() {
     create_live_window(&x11, first, false);
     create_live_window(&x11, second, false);
     let (_, _, node) = manage_window(&mut app, first.resource_id());
+    // Production maps an adopted client before draining its focus effects.
+    window::map(&x11, first).unwrap();
     app.arrange_desktop(&x11, monitor, desktop).unwrap();
 
     app.state
@@ -531,6 +533,7 @@ fn live_presel_feedback_command_cancel_and_insertion_lifecycle() {
         .feedback
         .unwrap();
     manage_window(&mut app, second.resource_id());
+    window::map(&x11, second).unwrap();
     app.execute_pending_effects(&x11).unwrap();
     assert!(!window::exists(&x11, x::Window::new(consumed)));
 
@@ -954,6 +957,7 @@ fn live_load_state_reconstructs_x_resources_and_client_runtime_state() {
     )
     .unwrap();
     manage_window(&mut app, client.resource_id());
+    window::map(&x11, client).unwrap();
     let old_monitor_xid = app
         .state
         .world
@@ -1733,9 +1737,9 @@ fn live_focus_flag_moves_between_clients() {
 
 #[test]
 #[ignore = "requires a live X server selected by DISPLAY"]
-fn live_reset_desktops_maps_arranges_and_focuses_surviving_clients() {
+fn live_desktop_removal_maps_arranges_and_focuses_surviving_clients() {
     let x11 = X11::connect(None).expect("connect to DISPLAY");
-    for occupied in [false, true] {
+    for (occupied, reset) in [(false, true), (true, true), (false, false), (true, false)] {
         let (mut app, monitor, desktop) = app_with_desktop();
         let windows: [x::Window; 2] = std::array::from_fn(|_| x11.connection().generate_id());
         for window in windows {
@@ -1774,12 +1778,13 @@ fn live_reset_desktops_maps_arranges_and_focuses_surviving_clients() {
             x::MapState::Unmapped
         );
 
-        app.dispatch(
-            Domain::Monitor,
-            &[b"--reset-desktops", b"only"],
-            &mut TestResponse::default(),
-        )
-        .unwrap();
+        let (domain, args): (_, &[&[u8]]) = if reset {
+            (Domain::Monitor, &[b"--reset-desktops", b"only"])
+        } else {
+            (Domain::Desktop, &[b"second", b"--remove"])
+        };
+        app.dispatch(domain, args, &mut TestResponse::default())
+            .unwrap();
         app.execute_pending_effects(&x11).unwrap();
         assert_eq!(app.state.world.monitor(monitor).desktops, [desktop]);
         for window in windows {
@@ -1788,7 +1793,7 @@ fn live_reset_desktops_maps_arranges_and_focuses_surviving_clients() {
                     .unwrap()
                     .map_state(),
                 x::MapState::Viewable,
-                "occupied={occupied}"
+                "occupied={occupied}, reset={reset}"
             );
             let geometry = window::geometry(&x11, window).unwrap().rectangle;
             assert!(
@@ -1807,6 +1812,88 @@ fn live_reset_desktops_maps_arranges_and_focuses_surviving_clients() {
         for window in windows {
             window::destroy(&x11, window).unwrap();
         }
+    }
+}
+
+#[test]
+#[ignore = "requires a live X server selected by DISPLAY"]
+fn live_follow_rule_switches_visibility_and_focus_for_all_clients() {
+    let x11 = X11::connect(None).expect("connect to DISPLAY");
+    let (mut app, _, _) = app_with_desktop();
+    let old: x::Window = x11.connection().generate_id();
+    let waiting: x::Window = x11.connection().generate_id();
+    let following: x::Window = x11.connection().generate_id();
+    create_live_window(&x11, old, false);
+    app.schedule_window(&x11, old.resource_id())
+        .unwrap()
+        .unwrap();
+    app.dispatch(
+        Domain::Monitor,
+        &[b"--add-desktops", b"second"],
+        &mut TestResponse::default(),
+    )
+    .unwrap();
+    app.execute_pending_effects(&x11).unwrap();
+    for (window, class, rule, options) in [
+        (
+            waiting,
+            &b"waiting\0Audit\0"[..],
+            &b"Audit:waiting"[..],
+            &b"focus=off"[..],
+        ),
+        (
+            following,
+            &b"following\0Audit\0"[..],
+            &b"Audit:following"[..],
+            &b"follow=on"[..],
+        ),
+    ] {
+        create_live_window(&x11, window, false);
+        set_live_class(&x11, window, class);
+        app.dispatch(
+            Domain::Rule,
+            &[b"--add", rule, b"desktop=second", options],
+            &mut TestResponse::default(),
+        )
+        .unwrap();
+    }
+    app.schedule_window(&x11, waiting.resource_id())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        x11.request(&x::GetWindowAttributes { window: waiting })
+            .unwrap()
+            .map_state(),
+        x::MapState::Unmapped
+    );
+    app.schedule_window(&x11, following.resource_id())
+        .unwrap()
+        .unwrap();
+    for (window, expected) in [
+        (old, x::MapState::Unmapped),
+        (waiting, x::MapState::Viewable),
+        (following, x::MapState::Viewable),
+    ] {
+        assert_eq!(
+            x11.request(&x::GetWindowAttributes { window })
+                .unwrap()
+                .map_state(),
+            expected
+        );
+        let flags =
+            window::get_property::<u32>(&x11, window, x11.atoms().net_wm_state, x::ATOM_ATOM)
+                .unwrap();
+        assert_eq!(
+            flags.contains(&x11.atoms().net_wm_state_focused.resource_id()),
+            window == following
+        );
+    }
+    assert_eq!(
+        x11.request(&x::GetInputFocus {}).unwrap().focus(),
+        following
+    );
+    for window in [old, waiting, following] {
+        window::destroy(&x11, window).unwrap();
     }
 }
 

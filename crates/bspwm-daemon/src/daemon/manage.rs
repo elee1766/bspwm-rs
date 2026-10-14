@@ -298,15 +298,24 @@ impl DaemonApp {
             return None;
         }
         self.tree_mut().sync_vacancy(node);
+        self.world_mut().desktop_mut(desktop).tree = tree_state;
         if !consequence.hidden && consequence.focus {
-            tree_state.focus = Some(node);
-            if self.world().monitor(monitor).active_desktop == Some(desktop) || consequence.follow {
-                self.world_mut().focused_monitor = Some(monitor);
-                self.world_mut().monitor_mut(monitor).active_desktop = Some(desktop);
+            if receives_focus {
+                // Use the same focus transition as commands, including hiding
+                // the old desktop, showing the destination, and clearing the
+                // old client's EWMH focus flag. Management does not warp the
+                // pointer; geometry is arranged after this bookkeeping step.
+                let policy = crate::state::FocusPolicy::suppressed(&self.state, true, false);
+                self.command().focus_location_with(
+                    crate::query::Coordinates::node(monitor, desktop, node),
+                    false,
+                    policy,
+                );
                 self.node_mut(node).client.as_mut()?.shown = true;
+            } else {
+                self.world_mut().desktop_mut(desktop).tree.focus = Some(node);
             }
         }
-        self.world_mut().desktop_mut(desktop).tree = tree_state;
         let previous_layout = self.world().desktop(desktop).layout;
         let single_monocle = self.state.settings.single_monocle;
         let leave_single_monocle = single_monocle
@@ -503,21 +512,11 @@ impl DaemonApp {
         if client.is_some_and(|client| client.shown) {
             plan.push(XAction::Map { window: window_id });
         }
-        let focus_client = if !consequence.hidden
+        let focused = !consequence.hidden
             && consequence.focus
             && self.world().focused_monitor == Some(monitor)
-            && self.world().monitor(monitor).active_desktop == Some(desktop)
-        {
-            let client = self.client(node);
-            Some((client.icccm.input_hint, client.icccm.take_focus))
-        } else {
-            None
-        };
-        let focused = focus_client.is_some();
+            && self.world().monitor(monitor).active_desktop == Some(desktop);
         Self::execute_plan(x11, &plan)?;
-        if let Some((input_hint, take_focus)) = focus_client {
-            window::focus_client(x11, window_id_typed, input_hint, take_focus)?;
-        }
         crate::pointer::grab_client_buttons(
             x11,
             window_id_typed,
@@ -553,6 +552,7 @@ impl DaemonApp {
                 self.complete_stack_operation(backend, result)?;
             }
         }
+        self.execute_pending_effects(x11)?;
         self.sync_stacking_ewmh(x11, desktop)?;
         self.sync_window_state(x11, node)?;
         self.refresh_colors(x11)?;

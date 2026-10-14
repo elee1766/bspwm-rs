@@ -35,6 +35,31 @@ impl CommandHandler<'_> {
             .push(CommandEffect::RefreshBorders);
     }
 
+    /// Reconciles trees merged by desktop removal with the surviving active
+    /// desktop. Both explicit removal and a monitor reset need this repair.
+    pub(super) fn reconcile_monitor_desktops(&mut self, monitor: crate::world::MonitorId) {
+        let active = self.state.world.monitor(monitor).active_desktop;
+        for desktop in self.state.world.monitor(monitor).desktops.clone() {
+            if let Some(root) = self.state.world.desktop(desktop).tree.root {
+                self.state
+                    .pending_effects
+                    .push(CommandEffect::SetWindowVisibility {
+                        node: root,
+                        visible: Some(desktop) == active,
+                    });
+            }
+            self.arrange_effect(monitor, desktop);
+        }
+        if self.state.world.focused_monitor == Some(monitor)
+            && let Some(desktop) = active
+        {
+            let _ = self.focus_location(Coordinates::in_desktop(monitor, desktop, None), false);
+        }
+        self.state
+            .pending_effects
+            .extend([CommandEffect::RefreshBorders, CommandEffect::SyncEwmh]);
+    }
+
     pub(super) fn broadcast(&mut self, mask: crate::types::SubscriberMask, status: String) {
         self.state.pending_effects.push(CommandEffect::Broadcast {
             mask,

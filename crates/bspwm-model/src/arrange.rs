@@ -108,12 +108,14 @@ pub fn apply_size_hints(client: &Client, width: i32, height: i32) -> (i32, i32) 
     }
     let hints = client.size_hints;
     let (base, min) = (SizeHints::BASE_SIZE, SizeHints::MIN_SIZE);
-    let real_base_width = preferred(hints, base, hints.base_width, NO_FLAG, 0);
-    let real_base_height = preferred(hints, base, hints.base_height, NO_FLAG, 0);
-    let base_width = preferred(hints, base, hints.base_width, min, hints.min_width);
-    let base_height = preferred(hints, base, hints.base_height, min, hints.min_height);
-    let min_width = preferred(hints, min, hints.min_width, base, hints.base_width);
-    let min_height = preferred(hints, min, hints.min_height, base, hints.base_height);
+    // Clients supply these signed values. Negative sizes are invalid and can
+    // overflow both aspect-ratio and resize-increment arithmetic.
+    let real_base_width = preferred(hints, base, hints.base_width, NO_FLAG, 0).max(0);
+    let real_base_height = preferred(hints, base, hints.base_height, NO_FLAG, 0).max(0);
+    let base_width = preferred(hints, base, hints.base_width, min, hints.min_width).max(0);
+    let base_height = preferred(hints, base, hints.base_height, min, hints.min_height).max(0);
+    let min_width = preferred(hints, min, hints.min_width, base, hints.base_width).max(0);
+    let min_height = preferred(hints, min, hints.min_height, base, hints.base_height).max(0);
     let (mut width, mut height) = (width, height);
 
     if flag(hints, SizeHints::ASPECT)
@@ -781,6 +783,36 @@ mod tests {
 
         let action = arrange(&mut world, monitor, desktop, &settings)[0];
         assert_eq!(action.rectangle, Rectangle::new(-32_778, 32_757, 25, 25));
+    }
+
+    #[test]
+    fn negative_size_hints_do_not_overflow_or_disable_resize_increments() {
+        let mut client = Client::from_settings(&Settings::default());
+        client.honor_size_hints = crate::types::HonorSizeHintsMode::Yes;
+        for flags in [SizeHints::BASE_SIZE, SizeHints::MIN_SIZE] {
+            client.size_hints = SizeHints {
+                flags: flags | SizeHints::RESIZE_INC,
+                base_width: i32::MIN,
+                base_height: i32::MIN,
+                min_width: i32::MIN,
+                min_height: i32::MIN,
+                width_inc: 7,
+                height_inc: 11,
+                ..SizeHints::default()
+            };
+            assert_eq!(apply_size_hints(&client, 80, 90), (77, 88));
+        }
+        client.size_hints = SizeHints {
+            flags: SizeHints::BASE_SIZE | SizeHints::ASPECT,
+            base_width: i32::MIN,
+            base_height: i32::MIN,
+            min_aspect_num: 1,
+            min_aspect_den: 1,
+            max_aspect_num: 1,
+            max_aspect_den: 1,
+            ..SizeHints::default()
+        };
+        assert_eq!(apply_size_hints(&client, 80, 90), (80, 80));
     }
 
     #[test]

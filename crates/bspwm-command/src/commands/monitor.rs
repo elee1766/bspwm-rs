@@ -159,33 +159,7 @@ impl CommandHandler<'_> {
                             };
                             self.purge_removal(&removal);
                         }
-                        // Removing the active desktop can select a previously
-                        // hidden fallback and merge clients into its tree.
-                        // Reconcile every surviving tree against the final
-                        // active desktop, then restore real X input focus.
-                        let active = self.state.world.monitor(monitor).active_desktop;
-                        for desktop in self.state.world.monitor(monitor).desktops.clone() {
-                            if let Some(root) = self.state.world.desktop(desktop).tree.root {
-                                self.state.pending_effects.push(
-                                    CommandEffect::SetWindowVisibility {
-                                        node: root,
-                                        visible: Some(desktop) == active,
-                                    },
-                                );
-                            }
-                            self.arrange_effect(monitor, desktop);
-                        }
-                        if self.state.world.focused_monitor == Some(monitor)
-                            && let Some(desktop) = active
-                        {
-                            let _ = self.focus_location(
-                                super::Coordinates::in_desktop(monitor, desktop, None),
-                                false,
-                            );
-                        }
-                        self.state
-                            .pending_effects
-                            .push(CommandEffect::RefreshBorders);
+                        self.reconcile_monitor_desktops(monitor);
                     }
                     self.state.pending_effects.push(CommandEffect::SyncEwmh);
                     break;

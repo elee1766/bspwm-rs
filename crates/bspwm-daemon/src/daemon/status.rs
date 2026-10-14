@@ -41,6 +41,9 @@ impl DaemonApp {
     }
 
     pub fn broadcast_status(&mut self, mask: SubscriberMask, status: &[u8]) {
+        // A FIFO reader can connect while commands or X events are being
+        // processed, before the next idle sweep activates its subscription.
+        self.poll_pending_fifo_subscriptions();
         if self.subscribers.entries().is_empty() {
             return;
         }

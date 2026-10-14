@@ -456,11 +456,7 @@ impl CommandHandler<'_> {
                         return fail(rsp, b"");
                     };
                     self.purge_removal(&removal);
-                    if let Some(fallback) = self.state.world.monitor(monitor).active_desktop {
-                        self.structural_effects(&[(monitor, fallback)]);
-                    } else {
-                        self.state.pending_effects.push(CommandEffect::SyncEwmh);
-                    }
+                    self.reconcile_monitor_desktops(monitor);
                     self.broadcast(
                         crate::types::SubscriberMask::DESKTOP_REMOVE,
                         format!(
