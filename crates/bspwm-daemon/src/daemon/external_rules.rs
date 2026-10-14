@@ -82,7 +82,12 @@ impl ExternalRuleProcess {
 
     pub fn reap(&mut self) -> bool {
         if !self.reaped {
-            self.reaped = self.child.try_wait().is_ok_and(|status| status.is_some());
+            self.reaped = match self.child.try_wait() {
+                Ok(status) => status.is_some(),
+                // The runtime's SIGCHLD sweep may have collected this child
+                // since our last poll. Do not retain it or signal its old PID.
+                Err(error) => error.raw_os_error() == Some(nix::libc::ECHILD),
+            };
         }
         self.reaped
     }
@@ -197,6 +202,19 @@ mod tests {
         let mut process = spawn_script(&path, u32::MAX, &RuleConsequence::default());
         await_output(&mut process);
         assert_eq!(process.output(), b"-1");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn externally_reaped_rule_finishes_and_preserves_its_output() {
+        let path = script("printf 'focus=off'");
+        let mut process = spawn_script(&path, 1, &RuleConsequence::default());
+        // Reproduce the runtime's SIGCHLD sweep winning the race with poll().
+        let pid = nix::unistd::Pid::from_raw(i32::try_from(process.child.id()).unwrap());
+        nix::sys::wait::waitpid(pid, None).unwrap();
+        assert!(process.poll(), "exited child's stdout should reach EOF");
+        assert_eq!(process.output(), b"focus=off");
+        assert!(process.reap(), "an already reaped child must be complete");
         fs::remove_file(path).unwrap();
     }
 

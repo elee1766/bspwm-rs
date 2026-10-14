@@ -5,7 +5,9 @@ use std::io::{self, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::time::Instant;
 
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use xcb::{Xid, XidNew, x};
 
 use bspwm_ipc::set_inheritable;
@@ -29,11 +31,52 @@ pub(super) enum SubscriberOutput {
 }
 
 impl SubscriberOutput {
+    // The registry disconnects writers on error, including WouldBlock. This
+    // bounds backpressure to the kernel buffer instead of stalling the WM.
+    fn nonblocking(self) -> io::Result<Self> {
+        let flags = OFlag::from_bits_truncate(fcntl(&self, FcntlArg::F_GETFL)?);
+        fcntl(&self, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
+        Ok(self)
+    }
+
     fn writer(&mut self) -> &mut dyn Write {
         match self {
             Self::Socket(stream) => stream,
             Self::Fifo(stream) => stream,
         }
+    }
+}
+
+/// A FIFO reader connects after receiving its path over the control socket.
+/// Keep that handshake off the event loop's blocking I/O path, and reclaim
+/// abandoned paths after the same grace period used for incoming requests.
+#[derive(Debug)]
+pub(super) struct PendingFifoSubscription {
+    subscription: Subscription,
+    deadline: Instant,
+}
+
+impl Drop for PendingFifoSubscription {
+    fn drop(&mut self) {
+        if let Some(path) = &self.subscription.fifo_path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn subscriber_write_result(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            Ok(())
+        }
+        result => result,
     }
 }
 
@@ -283,8 +326,9 @@ impl DaemonApp {
                     fds.take_unix_stream(subscriber.file_descriptor)?,
                 ))
             };
+            let output = output.nonblocking()?;
             let report = print_report(self.world(), &self.state.settings);
-            self.subscribers.add_subscriber(
+            subscriber_write_result(self.subscribers.add_subscriber(
                 make_subscriber(
                     output,
                     subscriber.fifo_path.map(Into::into),
@@ -292,12 +336,14 @@ impl DaemonApp {
                     subscriber.count,
                 ),
                 &report,
-            )?;
+            ))?;
         }
         Ok(())
     }
 
     pub(super) fn write_restart_state(&mut self, path: &Path) -> Result<Vec<RawFd>, RuntimeError> {
+        // Handshakes with no connected reader have no descriptor to inherit.
+        self.pending_fifo_subscriptions.clear();
         let mut state: serde_json::Value =
             serde_json::from_str(&crate::query::query_state(&self.state))
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -332,34 +378,72 @@ impl DaemonApp {
         mut response: UnixResponse,
         subscription: Subscription,
     ) -> Result<(), RuntimeError> {
-        let (output, fifo_path) = if let Some(path) = subscription.fifo_path {
+        if let Some(path) = &subscription.fifo_path {
             if let Err(error) = response.close() {
-                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(path);
                 return Err(error.into());
             }
-            let stream = match OpenOptions::new().write(true).open(&path) {
-                Ok(stream) => stream,
-                Err(error) => {
-                    let _ = std::fs::remove_file(&path);
-                    return Err(error.into());
-                }
-            };
-            (SubscriberOutput::Fifo(stream), Some(path))
-        } else {
-            (SubscriberOutput::Socket(response), None)
-        };
+            self.pending_fifo_subscriptions
+                .push(PendingFifoSubscription {
+                    subscription,
+                    deadline: Instant::now() + crate::runtime::DEFAULT_READ_TIMEOUT,
+                });
+            return Ok(());
+        }
+        let output = SubscriberOutput::Socket(response).nonblocking()?;
         let report = print_report(self.world(), &self.state.settings);
-        self.subscribers.add_subscriber(
-            make_subscriber(output, fifo_path, subscription.mask, subscription.count),
+        // Sending the initial report can fill the socket too. Treat a
+        // stalled or disconnected subscriber like one lost mid-broadcast.
+        subscriber_write_result(self.subscribers.add_subscriber(
+            make_subscriber(output, None, subscription.mask, subscription.count),
             &report,
-        )?;
+        ))?;
         Ok(())
     }
 
     pub(super) fn prune_dead_subscribers(&mut self) {
+        self.poll_pending_fifo_subscriptions();
         self.subscribers.prune_dead(|output| match output {
             SubscriberOutput::Socket(response) => response.peer_disconnected(),
             SubscriberOutput::Fifo(_) => false,
+        });
+    }
+
+    fn poll_pending_fifo_subscriptions(&mut self) {
+        if self.pending_fifo_subscriptions.is_empty() {
+            return;
+        }
+        let report = print_report(self.world(), &self.state.settings);
+        let now = Instant::now();
+        self.pending_fifo_subscriptions.retain_mut(|pending| {
+            if now >= pending.deadline {
+                return false;
+            }
+            let Some(path) = pending.subscription.fifo_path.as_ref() else {
+                return false;
+            };
+            match OpenOptions::new()
+                .write(true)
+                .custom_flags(nix::libc::O_NONBLOCK)
+                .open(path)
+            {
+                Ok(stream) => {
+                    let subscriber = make_subscriber(
+                        SubscriberOutput::Fifo(stream),
+                        pending.subscription.fifo_path.take(),
+                        pending.subscription.mask,
+                        pending.subscription.count,
+                    );
+                    // A vanished or backpressured reader only loses its own
+                    // subscription; it must not take down the daemon.
+                    let _ = self.subscribers.add_subscriber(subscriber, &report);
+                    false
+                }
+                Err(error) => matches!(
+                    error.raw_os_error(),
+                    Some(nix::libc::ENXIO | nix::libc::EINTR)
+                ),
+            }
         });
     }
 }
@@ -465,6 +549,7 @@ mod tests {
         control
             .write_all(b"subscribe\x00--fifo\x00--count\x002\x00report\x00monitor_rename\x00")
             .unwrap();
+        let (completed, completion) = std::sync::mpsc::channel();
         let server = thread::spawn(move || {
             let (outcome, response) = crate::runtime::handle_stream(
                 server,
@@ -478,14 +563,26 @@ mod tests {
                 panic!("expected subscription outcome");
             };
             app.retain_response(response, subscription).unwrap();
-            app
+            completed.send(app).unwrap();
         });
 
         let mut path = String::new();
         control.read_to_string(&mut path).unwrap();
         let path = std::path::PathBuf::from(path.trim_end());
-        let mut fifo = OpenOptions::new().read(true).open(&path).unwrap();
-        let mut app = server.join().unwrap();
+        // A client may never open the advertised FIFO. Retaining its request
+        // must return to the event loop before a reader exists.
+        let early = completion.recv_timeout(Duration::from_secs(1));
+        let returned_before_reader = early.is_ok();
+        let mut fifo = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NONBLOCK)
+            .open(&path)
+            .unwrap();
+        let mut app =
+            early.unwrap_or_else(|_| completion.recv_timeout(Duration::from_secs(1)).unwrap());
+        server.join().unwrap();
+        assert!(returned_before_reader, "FIFO open blocked the event loop");
+        app.prune_dead_subscribers();
 
         let report = b"WMmonitor:FI:LT\n";
         let mut bytes = vec![0; report.len()];
@@ -503,5 +600,64 @@ mod tests {
         assert_eq!(event, b"monitor_rename 0x00000001 monitor new\n");
         assert!(!path.exists());
         assert_eq!(app.subscriber_count(), 0);
+    }
+
+    #[test]
+    fn slow_subscribers_are_disconnected_without_blocking_the_daemon() {
+        for (fifo, initial_report) in [(false, false), (true, false), (false, true)] {
+            let (mut app, _, _) = app_with_desktop();
+            let (server, client) = UnixStream::pair().unwrap();
+            let path = fifo.then(|| test_path("slow-fifo"));
+            let reader: Box<dyn Send> = if let Some(path) = &path {
+                nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+                Box::new(
+                    OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(path)
+                        .unwrap(),
+                )
+            } else {
+                Box::new(client)
+            };
+            if initial_report {
+                app.state.settings.status_prefix = "x".repeat(4 * 1024 * 1024);
+            }
+            let subscription = Subscription {
+                mask: if initial_report {
+                    SubscriberMask::REPORT
+                } else {
+                    SubscriberMask::NODE
+                },
+                count: -1,
+                fifo_path: path.clone(),
+            };
+            let (completed, completion) = std::sync::mpsc::channel();
+            let worker = thread::spawn(move || {
+                app.retain_response(UnixResponse::new(server), subscription)
+                    .unwrap();
+                app.prune_dead_subscribers();
+                if !initial_report {
+                    // Larger than the kernel socket/pipe buffer; nobody reads.
+                    app.broadcast_status(SubscriberMask::NODE, &vec![b'x'; 4 * 1024 * 1024]);
+                }
+                completed.send(app).unwrap();
+            });
+            let early = completion.recv_timeout(Duration::from_secs(1));
+            let returned_without_reader = early.is_ok();
+            // Release a regressed blocking writer so failure cannot hang the suite.
+            drop(reader);
+            let app =
+                early.unwrap_or_else(|_| completion.recv_timeout(Duration::from_secs(1)).unwrap());
+            worker.join().unwrap();
+            assert!(
+                returned_without_reader,
+                "blocked: fifo={fifo}, initial={initial_report}"
+            );
+            assert_eq!(app.subscriber_count(), 0);
+            if let Some(path) = path {
+                assert!(!path.exists());
+            }
+        }
     }
 }

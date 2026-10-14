@@ -63,6 +63,7 @@ fn timestamp_is_later(candidate: x::Timestamp, reference: x::Timestamp) -> bool 
 pub struct DaemonApp {
     pub state: DaemonState,
     subscribers: Subscribers<SubscriberOutput>,
+    pending_fifo_subscriptions: Vec<persist::PendingFifoSubscription>,
     lock_masks: crate::pointer::LockMasks,
     mapping_filter: MappingFilterState,
     pointer_filter: PointerFilterState,
@@ -256,6 +257,7 @@ impl DaemonApp {
         Self {
             state,
             subscribers: Subscribers::default(),
+            pending_fifo_subscriptions: Vec::new(),
             lock_masks: crate::pointer::LockMasks::default(),
             mapping_filter: MappingFilterState::new(mapping_events_count),
             pointer_filter: PointerFilterState::default(),
