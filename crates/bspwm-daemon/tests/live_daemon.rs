@@ -1695,6 +1695,121 @@ fn create_live_window(x11: &X11, window: x::Window, override_redirect: bool) {
     .unwrap();
 }
 
+#[test]
+#[ignore = "requires a live X server selected by DISPLAY"]
+fn live_focus_flag_moves_between_clients() {
+    let x11 = X11::connect(None).expect("connect to DISPLAY");
+    let (mut app, _, _) = app_with_desktop();
+    let windows: [x::Window; 2] = std::array::from_fn(|_| x11.connection().generate_id());
+    for window in windows {
+        create_live_window(&x11, window, false);
+        manage_window(&mut app, window.resource_id());
+        window::map(&x11, window).unwrap();
+    }
+    for focused in [windows[0], windows[1], windows[0]] {
+        let descriptor = format!("0x{:08X}", focused.resource_id());
+        app.dispatch(
+            Domain::Node,
+            &[descriptor.as_bytes(), b"--focus"],
+            &mut TestResponse::default(),
+        )
+        .unwrap();
+        app.execute_pending_effects(&x11).unwrap();
+        assert_eq!(x11.request(&x::GetInputFocus {}).unwrap().focus(), focused);
+        for window in windows {
+            let states =
+                window::get_property::<u32>(&x11, window, x11.atoms().net_wm_state, x::ATOM_ATOM)
+                    .unwrap();
+            assert_eq!(
+                states.contains(&x11.atoms().net_wm_state_focused.resource_id()),
+                window == focused
+            );
+        }
+    }
+    for window in windows {
+        window::destroy(&x11, window).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires a live X server selected by DISPLAY"]
+fn live_reset_desktops_maps_arranges_and_focuses_surviving_clients() {
+    let x11 = X11::connect(None).expect("connect to DISPLAY");
+    for occupied in [false, true] {
+        let (mut app, monitor, desktop) = app_with_desktop();
+        let windows: [x::Window; 2] = std::array::from_fn(|_| x11.connection().generate_id());
+        for window in windows {
+            create_live_window(&x11, window, false);
+            manage_window(&mut app, window.resource_id());
+            window::map(&x11, window).unwrap();
+        }
+        app.dispatch(
+            Domain::Monitor,
+            &[b"--add-desktops", b"second"],
+            &mut TestResponse::default(),
+        )
+        .unwrap();
+        app.execute_pending_effects(&x11).unwrap();
+        if occupied {
+            let descriptor = format!("0x{:08X}", windows[1].resource_id());
+            app.dispatch(
+                Domain::Node,
+                &[descriptor.as_bytes(), b"--to-desktop", b"second"],
+                &mut TestResponse::default(),
+            )
+            .unwrap();
+            app.execute_pending_effects(&x11).unwrap();
+        }
+        app.dispatch(
+            Domain::Desktop,
+            &[b"second", b"--focus"],
+            &mut TestResponse::default(),
+        )
+        .unwrap();
+        app.execute_pending_effects(&x11).unwrap();
+        assert_eq!(
+            x11.request(&x::GetWindowAttributes { window: windows[0] })
+                .unwrap()
+                .map_state(),
+            x::MapState::Unmapped
+        );
+
+        app.dispatch(
+            Domain::Monitor,
+            &[b"--reset-desktops", b"only"],
+            &mut TestResponse::default(),
+        )
+        .unwrap();
+        app.execute_pending_effects(&x11).unwrap();
+        assert_eq!(app.state.world.monitor(monitor).desktops, [desktop]);
+        for window in windows {
+            assert_eq!(
+                x11.request(&x::GetWindowAttributes { window })
+                    .unwrap()
+                    .map_state(),
+                x::MapState::Viewable,
+                "occupied={occupied}"
+            );
+            let geometry = window::geometry(&x11, window).unwrap().rectangle;
+            assert!(
+                geometry.width > 0 && geometry.width < 100,
+                "clients must be retiled: {geometry:?}"
+            );
+        }
+        let focused = app.state.world.desktop(desktop).tree.focus.unwrap();
+        assert_eq!(
+            x11.request(&x::GetInputFocus {})
+                .unwrap()
+                .focus()
+                .resource_id(),
+            app.state.world.tree.node(focused).external_id
+        );
+        for window in windows {
+            window::destroy(&x11, window).unwrap();
+        }
+    }
+}
+
 fn set_live_class(x11: &X11, window: x::Window, class: &[u8]) {
     window::set_property(x11, window, x11.atoms().wm_class, x::ATOM_STRING, class).unwrap();
 }

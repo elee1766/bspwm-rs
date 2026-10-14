@@ -78,6 +78,32 @@ fn fixture() -> DaemonState {
     state
 }
 
+#[test]
+fn load_state_rejects_trailing_commands_before_mutating_state() {
+    let mut state = fixture();
+    let before = crate::query::query_state(&state);
+    let path = std::env::temp_dir().join(format!("bspwm-load-terminal-{}", std::process::id()));
+    std::fs::write(&path, &before).unwrap();
+    let response = run(
+        &mut state,
+        &[
+            b"wm",
+            b"--load-state",
+            path.as_os_str().as_bytes(),
+            b"--add-monitor",
+            b"extra",
+            b"100x100+800+0",
+        ],
+    );
+    std::fs::remove_file(path).unwrap();
+    assert!(
+        response.starts_with(b"\x07wm --load-state:"),
+        "{response:?}"
+    );
+    assert_eq!(crate::query::query_state(&state), before);
+    assert!(state.pending_effects.is_empty());
+}
+
 /// The client a node holds; every caller here builds the node with one.
 fn client(state: &DaemonState, node: crate::tree::NodeId) -> &Client {
     state

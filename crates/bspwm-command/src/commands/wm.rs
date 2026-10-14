@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::{
     ArgCursor, CommandEffect, CommandHandler, CommandParseError, Response, fail, locate_monitor,
-    parse_bool, parse_rectangle, text,
+    parse_bool, parse_rectangle, parse_terminal, text,
 };
 use crate::query::query_state;
 use crate::restore::restore_state;
@@ -44,6 +44,7 @@ command_set! {
         DumpState => [b"-d", b"--dump-state"],
         LoadState {
             path: &'a [u8] = raw,
+            terminal: () = custom(parse_terminal),
         } => [b"-l", b"--load-state"],
         GetStatus => [b"-g", b"--get-status"],
         RecordHistory {
@@ -71,7 +72,9 @@ impl CommandHandler<'_> {
                 WmCommand::DumpState => {
                     writeln!(rsp, "{}", query_state(self.state))?;
                 }
-                WmCommand::LoadState { path } => {
+                WmCommand::LoadState { path, terminal: () } => {
+                    // Restoration replaces every arena. Reject trailing work
+                    // before it can queue references into the old world.
                     let path = Path::new(std::ffi::OsStr::from_bytes(path));
                     let Ok(json) = std::fs::read_to_string(path) else {
                         return fail(rsp, b"");

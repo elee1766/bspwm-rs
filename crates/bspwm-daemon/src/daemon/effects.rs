@@ -86,6 +86,7 @@ impl DaemonApp {
             .union(WmFlags::FULLSCREEN)
             .union(WmFlags::ABOVE)
             .union(WmFlags::BELOW)
+            .union(WmFlags::FOCUSED)
             .union(WmFlags::DEMANDS_ATTENTION);
         let mut flags = client.wm_flags.difference(represented);
         if value.sticky {
